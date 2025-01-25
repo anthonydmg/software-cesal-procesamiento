@@ -1,0 +1,65 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Virtual environment
+venv/
+.env/
+
+# Distribution / packaging
+.Python
+dist/
+build/
+*.egg-info/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Unit test / coverage reports
+htmlcov/
+*.cover
+.coverage
+*.py,cover
+.cache
+nosetests.xml
+coverage.xml
+*.mo
+*.pot
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+
+# Pytest
+.pytest_cache/
+
+# VS Code
+.vscode/
+
+# IDEs y editores
+.idea/
+*.swp
+*.swo
+*.swn
+
+# Logs
+logs/
+*.log
+
+# Docker
+*.dockerignore
+
+# Configuración de entorno
+.envrc
+*.env
+
+# Archivos temporales y caché
+*.tmp
+*.bak
+~*
+.DS_Store
+data/
