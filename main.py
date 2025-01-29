@@ -1,6 +1,6 @@
-from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QStackedWidget, QLabel, QListWidgetItem, QPushButton, QFrame, QProgressBar, QSizePolicy, QDialog, QLineEdit, QFileDialog
+from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QStackedWidget, QLabel, QListWidgetItem, QPushButton, QFrame, QProgressBar, QSizePolicy, QDialog, QLineEdit, QFileDialog, QTableWidget, QTableWidgetItem, QScrollArea
 from PySide6.QtGui import QIcon, QPixmap
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QSize, Signal
 import os
 import folium
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -16,125 +16,12 @@ MAPBOX_TOKEN = os.getenv("MAPBOX_TOKEN")
 
 import sys
 
-class ImageSelectionDialog(QDialog):
-    def __init__(self, parent=None):
+class InitialConfigureScreen(QFrame):
+    def __init__(self, parent = None, dialog_parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Seleccionar Imágenes")
-        self.setFixedSize(800, 600)
-        
+        self.dialog_parent = dialog_parent  # Almacena la referencia a NewAnalysisDialog
         layout = QVBoxLayout()
-        self.info_label = QLabel("\u274C Se requieren al menos 3 imágenes en formato JPG o TIFF.")
-        self.info_label.setStyleSheet("color: red;")
-        layout.addWidget(self.info_label)
-        
-        self.image_list = QListWidget()
-        #self.image_list.setSelectionMode(QListWidget.MultiSelection)
 
-        self.image_list.setStyleSheet("""
-            QListWidget::item:hover { background-color: rgba(100, 149, 237, 0.5); }
-            QListWidget::item:selected { background-color: rgba(70, 130, 180, 0.8); color: white; }
-        """)
-
-        
-        button_layout = QHBoxLayout()
-        self.add_images_button = QPushButton("Añadir Imágenes...")
-        self.add_images_button.clicked.connect(self.add_images)
-        button_layout.addWidget(self.add_images_button)
-        
-        self.add_folder_button = QPushButton("Anadir Folder...")
-        self.add_folder_button.clicked.connect(self.add_folder)
-        button_layout.addWidget(self.add_folder_button)
-
-        self.remove_selected_button = QPushButton("Eliminar Seleccionado")
-        self.remove_selected_button.clicked.connect(self.remove_selected)
-        button_layout.addWidget(self.remove_selected_button)
-        
-        layout.addLayout(button_layout)
-        layout.addWidget(self.image_list)
-
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setStyleSheet("""
-        QProgressBar {
-            border: 2px solid grey;
-            border-radius: 5px;
-            text-align: center;
-        }
-        QProgressBar::chunk {
-            background-color: #76e900;
-            width: 20px;
-        }
-        """)
-
-        self.progress_bar.setMinimumWidth(400)
-        self.progress_bar.setMinimum(0)
-        self.progress_bar.setMaximum(100)
-        self.progress_bar.setValue(0)
-        self.progress_bar.setFixedHeight(20)
-        self.progress_bar.setTextVisible(False)
-
-        self.progress_bar.setFormat("Leyendo EXIF Metadata: %p%") 
-
-        layout.addWidget(self.progress_bar)
-        self.progress_bar.setVisible(False)
-
-        bottom_layout = QHBoxLayout()
-        self.back_button = QPushButton("< Atrás")
-        self.back_button.clicked.connect(self.reject)
-        bottom_layout.addWidget(self.back_button)
-        
-        self.next_button = QPushButton("Siguiente >")
-        self.next_button.clicked.connect(self.start_read_metadata)
-        self.next_button.setEnabled(False)
-        bottom_layout.addWidget(self.next_button)
-        
-        layout.addLayout(bottom_layout)
-        
-        self.setLayout(layout)
-    
-    def start_read_metadata(self):
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setTextVisible(True)
-        for i in range(0,101):
-            self.progress_bar.setValue(i)
-            QApplication.processEvents()  # Esto permite que la interfaz se actualice
-            time.sleep(0.05)  # Simulando una tarea que tarda
-    
-    def add_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Seleccionar carpeta")
-        if folder:
-            files = [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(('.jpg', '.jpeg', '.tiff', '.tif'))]
-            self.image_list.addItems(files)
-        self.validate_selection()
-
-    def add_images(self):
-        files, _ = QFileDialog.getOpenFileNames(self, "Seleccionar imágenes", "", "Imágenes (*.jpg *.jpeg *.tiff *.tif)")
-        if files:
-            self.image_list.addItems(files)
-        self.validate_selection()
-    
-    def remove_selected(self):
-        for item in self.image_list.selectedItems():
-            self.image_list.takeItem(self.image_list.row(item))
-        self.validate_selection()
-    
-    def validate_selection(self):
-        if self.image_list.count() >= 3:
-            self.info_label.setText("✔ Imágenes seleccionadas correctamente.")
-            self.info_label.setStyleSheet("color: green;")
-            self.next_button.setEnabled(True)
-        else:
-            self.info_label.setText("\u274C Se requieren al menos 3 imágenes en formato JPG o TIFF.")
-            self.info_label.setStyleSheet("color: red;")
-            self.next_button.setEnabled(False)
-
-
-class NewAnalysisDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Nuevo Analisis")
-        self.setFixedSize(300,150)
-        layout = QVBoxLayout()
-        
         name_layout = QHBoxLayout()
         name_label = QLabel("Nombre:")
         self.name_input = QLineEdit()
@@ -154,38 +41,236 @@ class NewAnalysisDialog(QDialog):
         layout.addLayout(folder_layout)
 
         button_layout = QHBoxLayout()
-        self.create_button = QPushButton("Siguiente")
-        self.create_button.clicked.connect(self.validate_inputs)
+        self.next_button = QPushButton("Siguiente")
+        self.next_button.clicked.connect(self.go_to_image_selection_screen)
         self.cancel_button = QPushButton("Cancelar")
-        self.cancel_button.clicked.connect(self.reject)
+        self.cancel_button.clicked.connect(self.close_dialog)
         
-        button_layout.addWidget(self.create_button)
+        button_layout.addWidget(self.next_button)
         button_layout.addWidget(self.cancel_button)
+        button_layout.setAlignment(Qt.AlignBottom)
         layout.addLayout(button_layout)
+
         self.setLayout(layout)
-    
+
     def select_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Seleccionar carpeta")
+        folder = QFileDialog.getExistingDirectory(self, "Seleccionar Carperta")
         if folder:
             self.folder_input.setText(folder)
     
-    def validate_inputs(self):
-        if not self.name_input.text().strip():
-            self.name_input.setStyleSheet("border: 1px solid red;")
+    def go_to_image_selection_screen(self):
+        self.dialog_parent.go_to_image_selection_screen()
+    
+    def close_dialog(self):
+        parent = self.dialog_parent
+        if isinstance(parent, QDialog):
+            parent.reject() 
         else:
-            self.name_input.setStyleSheet("")
-        
-        if not self.folder_input.text().strip():
-            self.folder_input.setStyleSheet("border: 1px solid red;")
-        else:
-            self.folder_input.setStyleSheet("")
-        
-        if self.name_input.text().strip() and self.folder_input.text().strip():
-            self.open_image_selection()
+            parent.close()
 
-    def open_image_selection(self):
-        image_dialog = ImageSelectionDialog(self)
-        image_dialog.exec()
+class ImageSelectionScreen(QFrame):
+    def __init__(self, parent = None, dialog_parent=None):
+        super().__init__(parent)
+        self.dialog_parent = dialog_parent  # Almacena la referencia a NewAnalysisDialog
+        layout = QVBoxLayout()
+
+        self.info_label = QLabel("\u274C Se requieren al menos 3 imágenes en formato JPG o TIFF.")
+        self.info_label.setStyleSheet("color: red;")
+        layout.addWidget(self.info_label)
+        
+        self.image_list = QListWidget()
+        self.image_list.setSelectionMode(QListWidget.ExtendedSelection)
+
+        self.image_list.setStyleSheet(""" QListWidget::item:hover { background-color: rgba(100, 149, 237, 0.5); } 
+                                          QListWidget::item:selected { background-color: rgba(70, 130, 180, 0.8); color: white; }""")
+        
+        button_layout = QHBoxLayout()
+        self.add_images_button = QPushButton("Añadir Imágenes...")
+        self.add_images_button.clicked.connect(self.add_images)
+        button_layout.addWidget(self.add_images_button)
+        
+        self.add_folder_button = QPushButton("Añadir Carpeta...")
+        self.add_folder_button.clicked.connect(self.add_folder)
+        button_layout.addWidget(self.add_folder_button)
+
+        self.remove_selected_button = QPushButton("Eliminar Seleccionado")
+        self.remove_selected_button.clicked.connect(self.remove_selected)
+        button_layout.addWidget(self.remove_selected_button)
+        
+        layout.addLayout(button_layout)
+        layout.addWidget(self.image_list)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setStyleSheet(""" QProgressBar { border: 2px solid grey; border-radius: 5px; text-align: center; }
+                                           QProgressBar::chunk { background-color: #76e900; width: 20px; }""")
+
+        self.progress_bar.setMinimumWidth(400)
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setMaximum(100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFixedHeight(20)
+        self.progress_bar.setTextVisible(False)
+
+        self.progress_bar.setFormat("Leyendo EXIF Metadata: %p%") 
+
+        layout.addWidget(self.progress_bar)
+        self.progress_bar.setVisible(False)
+
+        button_layout = QHBoxLayout()
+        self.back_button = QPushButton("< Atrás")
+        self.back_button.clicked.connect(self.go_back_to_initial)
+        button_layout.addWidget(self.back_button)
+        
+        self.next_button = QPushButton("Siguiente >")
+        self.next_button.clicked.connect(self.start_read_metadata)
+        self.next_button.setEnabled(False)
+        button_layout.addWidget(self.next_button)
+        layout.addLayout(button_layout)
+        self.setLayout(layout)
+
+    def add_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Seleccionr carpeta")
+        if folder:
+            files = [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(('.jpg','.jpeg','.tiff','.tif'))]
+            self.image_list.addItems(files)
+        
+        self.validate_selection()
+    
+    def add_images(self):
+        files, _ = QFileDialog.getOpenFileNames(self, "Seleccionar imágenes", "", "Imágenes (*.jpg *.jpeg *.tiff *.tif)")
+        if files:
+            self.image_list.addItems(files)
+        self.validate_selection()
+    
+    def validate_selection(self):
+        if self.image_list.count() >= 3:
+            self.info_label.setText("✔ Imágenes seleccionadas correctamente.")
+            self.info_label.setStyleSheet("color: green;")
+            self.next_button.setEnabled(True)
+        else:
+            self.info_label.setText("\u274C Se requieren al menos 3 imágenes en formato JPG o TIFF.")
+            self.info_label.setStyleSheet("color: red;")
+            self.next_button.setEnabled(False)
+
+    def remove_selected(self):
+        for item in self.image_list.selectedItems():
+            self.image_list.takeItem(self.image_list.row(item))
+
+    def start_read_metadata(self):
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setTextVisible(True)
+        for i in range(0,101):
+            self.progress_bar.setValue(i)
+            QApplication.processEvents()
+            time.sleep(0.05)
+        
+        self.dialog_parent.go_to_image_data_table()
+    
+    def go_back_to_initial(self):
+        self.dialog_parent.go_back_to_initial()
+
+class ImageDataTableScreen(QFrame):
+    finished_configure = Signal()
+    def __init__(self, parent = None, dialog_parent=None):
+        super().__init__(parent)
+        self.dialog_parent = dialog_parent  # Almacena la referencia a NewAnalysisDialog
+        layout = QVBoxLayout()
+
+        # Título de la pantalla
+        self.title_label = QLabel("Propiedades de Imagen")
+        self.title_label.setAlignment(Qt.AlignCenter)  # Centra el título
+        layout.addWidget(self.title_label)
+
+        # Crear la tabla
+        self.table = QTableWidget()
+        self.table.setRowCount(0)
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels(["Nombre", "Latitud", "Longitud", "Ángulo Yaw", "Ángulo Pitch", "Ángulo Roll", "Fecha"])
+        self.add_image_data()
+
+        # Crear un área de desplazamiento para la tabla
+        scroll_area = QScrollArea()
+        scroll_area.setWidget(self.table)
+        scroll_area.setWidgetResizable(True)  # Hacer que la tabla se ajuste al tamaño del área
+        layout.addWidget(scroll_area)
+
+        # Botones en la parte inferior
+        button_layout = QHBoxLayout()
+        self.back_button = QPushButton("< Atrás")
+        self.back_button.clicked.connect(self.go_back_to_image_selection)
+        button_layout.addWidget(self.back_button)
+
+        self.finished_button = QPushButton('Finalizar')
+        self.finished_button.clicked.connect(self.finish_configure)
+        button_layout.addWidget(self.finished_button)
+
+        layout.addLayout(button_layout)
+
+        self.setLayout(layout)
+    
+    def go_back_to_image_selection(self):
+        self.dialog_parent.go_back_to_image_selection()
+    
+    def add_image_data(self):
+        image_data = [["Imagen1.jpg", "12.345", "-67.890", "139.5", "-90.0", "180.00" , "2025-01-28"],
+            ["Imagen2.tiff", "45.678", "-123.456", "2025-01-27",  "-90.0", "180.00" , "2025-01-28"],
+            ["Imagen3.jpg", "23.456", "-98.765", "2025-01-26",  "-90.0", "180.00" , "2025-01-28"]]
+        
+        for data in image_data:
+            row_position = self.table.rowCount()
+            self.table.insertRow(row_position)
+            for column, value in enumerate(data):
+                self.table.setItem(row_position, column, QTableWidgetItem(value))
+
+    def finish_configure(self):
+        self.finished_configure.emit()
+        if isinstance(self.dialog_parent, QDialog):
+            self.dialog_parent.accept()  
+        else:
+            self.dialog_parent.close()
+
+class NewAnalysisDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Nuevo Análisis")
+        self.setFixedSize(800, 600)
+
+        self.stacked_widget = QStackedWidget(self)  # Contenedor principal de pantallas
+        self.setLayout(QVBoxLayout())
+        self.layout().addWidget(self.stacked_widget)
+
+        # Crear pantallas
+        self.initial_screen = InitialConfigureScreen(dialog_parent = self)
+
+        #self.create_initial_screen()
+        self.image_selection_screen = ImageSelectionScreen(dialog_parent = self)
+
+        self.image_data_screen = ImageDataTableScreen(dialog_parent = self)
+        #
+        self.stacked_widget.addWidget(self.initial_screen)
+        self.stacked_widget.addWidget(self.image_selection_screen)
+        self.stacked_widget.addWidget(self.image_data_screen)
+
+        self.current_step = 0  # Variable para llevar el control de los pasos
+        self.stacked_widget.setCurrentIndex(self.current_step)  # Mostrar la pantalla inicial
+
+    def go_to_image_selection_screen(self):
+        """Método para ir al paso de selección de imágenes"""
+        if self.initial_screen.name_input.text().strip() and self.initial_screen.folder_input.text().strip():
+            self.stacked_widget.setCurrentIndex(1)  # Ir al segundo paso
+        else:
+            # Validar los campos (puedes agregar lógica de validación aquí)
+            self.initial_screen.name_input.setStyleSheet("border: 1px solid red;")
+            self.initial_screen.folder_input.setStyleSheet("border: 1px solid red;")
+    
+    def go_back_to_initial(self):
+        """Método para volver al primer paso"""
+        self.stacked_widget.setCurrentIndex(0)
+
+    def go_to_image_data_table(self):
+        """Método para ir al paso de tabla de datos de imagen"""
+        self.stacked_widget.setCurrentIndex(2)
+
 
 class CustomButton(QPushButton):
     def __init__(self, icon_path, title, description, parent=None):
@@ -256,8 +341,9 @@ class NavItem(QWidget):
         self.setLayout(layout)
 
 class Home(QWidget):
-    def __init__(self):
+    def __init__(self, main_window=None):
         super().__init__()
+        self.main_window = main_window
         layout = QVBoxLayout()
         layout.setAlignment(Qt.AlignCenter)
 
@@ -278,6 +364,7 @@ class Home(QWidget):
   
     def open_new_analysis_dialog(self):
         dialog = NewAnalysisDialog(self)
+        dialog.image_data_screen.finished_configure.connect(self.main_window.on_finish_configure)
         dialog.exec()
  
 class MapCaptures(QWidget):
@@ -466,7 +553,7 @@ class MainWindow(QWidget):
         # Contenedor central
         self.stack = QStackedWidget()
         # Contenido
-        self.page_home = Home()
+        self.page_home = Home(main_window=self)
         self.page_map_images = MapCaptures()
         self.page_map_trees= MapTrees()
 
@@ -482,6 +569,8 @@ class MainWindow(QWidget):
     def switch_page(self, index):
         self.stack.setCurrentIndex(index)
 
+    def on_finish_configure(self):
+        self.navbar.setCurrentRow(1)  # Cambiar al segundo ítem del navbar
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
