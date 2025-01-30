@@ -9,6 +9,8 @@ import time
 
 from dotenv import load_dotenv
 
+from utils import get_gps_coordinates, get_image_resolution, get_metadata
+
 load_dotenv()
 
 MAPBOX_TOKEN = os.getenv("MAPBOX_TOKEN")
@@ -25,6 +27,7 @@ class InitialConfigureScreen(QFrame):
         name_layout = QHBoxLayout()
         name_label = QLabel("Nombre:")
         self.name_input = QLineEdit()
+        self.name_input.textChanged.connect(self.validate_inputs)  # Validar al escribir
         name_layout.addWidget(name_label)
         name_layout.addWidget(self.name_input)
         layout.addLayout(name_layout)
@@ -32,6 +35,8 @@ class InitialConfigureScreen(QFrame):
         folder_layout = QHBoxLayout()
         folder_label = QLabel("Crear en:")
         self.folder_input = QLineEdit()
+        self.folder_input.setReadOnly(True)  # Para evitar que el usuario escriba manualmente
+        self.folder_input.textChanged.connect(self.validate_inputs)  # Validar al escribir
         self.folder_button = QPushButton("Seleccionar")
         self.folder_button.clicked.connect(self.select_folder)
         
@@ -42,6 +47,7 @@ class InitialConfigureScreen(QFrame):
 
         button_layout = QHBoxLayout()
         self.next_button = QPushButton("Siguiente")
+        self.next_button.setEnabled(False)  # Deshabilitado al inicio
         self.next_button.clicked.connect(self.go_to_image_selection_screen)
         self.cancel_button = QPushButton("Cancelar")
         self.cancel_button.clicked.connect(self.close_dialog)
@@ -59,7 +65,21 @@ class InitialConfigureScreen(QFrame):
             self.folder_input.setText(folder)
     
     def go_to_image_selection_screen(self):
-        self.dialog_parent.go_to_image_selection_screen()
+        """Crea la carpeta del análisis y avanza a la siguiente pantalla."""
+        name = self.name_input.text().strip()
+        folder_path = self.folder_input.text().strip()
+        # Construir la ruta final
+        final_path = os.path.join(folder_path, name)
+
+        try:
+            os.makedirs(final_path, exist_ok=True)  # Crea la carpeta si no existe
+            print(f"Carpeta creada: {final_path}")  # Debug (puedes eliminar esto después)
+
+            # Llamar al método para cambiar de pantalla
+            self.dialog_parent.go_to_image_selection_screen()
+        except Exception as e:
+            print(f"Error al crear la carpeta: {e}")  # Debug (puedes manejar errores de otra forma)
+        #self.dialog_parent.go_to_image_selection_screen()
     
     def close_dialog(self):
         parent = self.dialog_parent
@@ -67,6 +87,25 @@ class InitialConfigureScreen(QFrame):
             parent.reject() 
         else:
             parent.close()
+
+    def validate_inputs(self):
+        """Habilita el botón 'Siguiente' solo si ambos campos están llenos y cambia el color de los vacíos."""
+        name_filled = bool(self.name_input.text().strip())
+        folder_filled = bool(self.folder_input.text().strip())
+
+        # Estilo rojo si está vacío, normal si está lleno
+        self.name_input.setStyleSheet("border: 2px solid red;" if not name_filled else "")
+        self.folder_input.setStyleSheet("border: 2px solid red;" if not folder_filled else "")
+
+        # Habilitar o deshabilitar el botón de siguiente
+        self.next_button.setEnabled(name_filled and folder_filled)
+    
+    def validate_and_continue(self):
+        """Verifica si los campos están llenos antes de avanzar a la siguiente pantalla."""
+        self.validate_inputs()  # Actualiza los estilos visuales
+        if self.next_button.isEnabled():  # Solo avanza si está habilitado
+            self.go_to_image_selection_screen()
+
 
 class ImageSelectionScreen(QFrame):
     def __init__(self, parent = None, dialog_parent=None):
@@ -159,15 +198,67 @@ class ImageSelectionScreen(QFrame):
     def start_read_metadata(self):
         self.progress_bar.setVisible(True)
         self.progress_bar.setTextVisible(True)
-        for i in range(0,101):
-            self.progress_bar.setValue(i)
+        image_paths = [self.image_list.item(i).text() for i in range(self.image_list.count())]
+        total_images = len(image_paths)
+        metadata_list = []
+
+        for i, path in enumerate(image_paths):
+            # Actualizar progreso
+            progress = int((i + 1) / total_images * 100)
+            self.progress_bar.setValue(progress)
             QApplication.processEvents()
-            time.sleep(0.05)
+
+            # Leer metadatos
+            metadata = self.get_exif_data(path)
+            if metadata:
+                metadata_list.append([
+                    metadata["name"],
+                    metadata["image_width"],
+                    metadata["image_height"],
+                    metadata["latitude"],
+                    metadata["longitude"],
+                    metadata["yaw_degree"],
+                    metadata["pitch_degree"],
+                    metadata["roll_degree"],
+                    metadata["DateTimeOriginal"],
+                ])
         
+        self.dialog_parent.image_data_screen.load_metadata(metadata_list)
+
         self.dialog_parent.go_to_image_data_table()
     
     def go_back_to_initial(self):
         self.dialog_parent.go_back_to_initial()
+
+    def get_exif_data(self, image_path):
+        metadata = get_metadata(image_path)
+        latitude, longitude = get_gps_coordinates(metadata)
+        print(f"Latitud: {latitude}, Longitud: {longitude}")
+        image_width, image_height = get_image_resolution(metadata)
+        yaw_degree = metadata.get("XMP:GimbalYawDegree")
+        pitch_degree = metadata.get("XMP:GimbalPitchDegree")
+        roll_degree = metadata.get("XMP:GimbalRollDegree")
+
+        if not isinstance(yaw_degree, float):
+            signo, yaw_degree = (yaw_degree[0], yaw_degree[1:]) if yaw_degree[0] in '+-' else ("+", yaw_degree[0])
+            yaw_degree =  float(yaw_degree) if signo == '+' else -float(yaw_degree)
+        
+        datetime = metadata.get("EXIF:DateTimeOriginal")
+        basename = os.path.basename(image_path)
+        metadata_data = {
+            "name": basename,
+            "latitude": latitude,
+            "longitude" : longitude,
+            "yaw_degree": yaw_degree,
+            "pitch_degree": pitch_degree,
+            "roll_degree": roll_degree,
+            "DateTimeOriginal": datetime,
+            "image_width": image_width,
+            "image_height": image_height
+        }
+       
+        return metadata_data
+      
 
 class ImageDataTableScreen(QFrame):
     finished_configure = Signal()
@@ -185,8 +276,8 @@ class ImageDataTableScreen(QFrame):
         self.table = QTableWidget()
         self.table.setRowCount(0)
         self.table.setColumnCount(7)
-        self.table.setHorizontalHeaderLabels(["Nombre", "Latitud", "Longitud", "Ángulo Yaw", "Ángulo Pitch", "Ángulo Roll", "Fecha"])
-        self.add_image_data()
+        self.table.setHorizontalHeaderLabels(["Nombre","Ancho","Alto", "Latitud", "Longitud", "Ángulo Yaw", "Ángulo Pitch", "Ángulo Roll", "Fecha"])
+        #self.add_image_data()
 
         # Crear un área de desplazamiento para la tabla
         scroll_area = QScrollArea()
@@ -207,6 +298,14 @@ class ImageDataTableScreen(QFrame):
         layout.addLayout(button_layout)
 
         self.setLayout(layout)
+    
+    def load_metadata(self, metadata_list):
+        self.table.setRowCount(0)
+        for data in metadata_list:
+            row_position = self.table.rowCount()
+            self.table.insertRow(row_position)
+            for column, value in enumerate(data):
+                self.table.setItem(row_position, column, QTableWidgetItem(str(value)))
     
     def go_back_to_image_selection(self):
         self.dialog_parent.go_back_to_image_selection()
@@ -253,6 +352,14 @@ class NewAnalysisDialog(QDialog):
 
         self.current_step = 0  # Variable para llevar el control de los pasos
         self.stacked_widget.setCurrentIndex(self.current_step)  # Mostrar la pantalla inicial
+
+    def save_metadata(self, columns, metadata):
+        df = pd.DataFrame(metadata, columns=columns)
+        name =  self.initial_screen.name_input.text().strip()
+        folder_path =  self.initial_screen.folder_input.text().strip()
+        # Construir la ruta final
+        final_path = os.path.join(folder_path, name, "image_metadata.csv")
+        df.to_csv(final_path, index=False)
 
     def go_to_image_selection_screen(self):
         """Método para ir al paso de selección de imágenes"""
@@ -321,8 +428,6 @@ class CustomButton(QPushButton):
 
         #self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)  # Expansión horizontal automática
 
-
-
 class NavItem(QWidget):
     def __init__(self, icon_path, text):
         super().__init__()
@@ -354,7 +459,7 @@ class Home(QWidget):
         button_new = CustomButton("./assets/new.svg", "Nuevo Análisis", "Genera un nuevo analisis a partir de imagenes aereas para identificar deficiencias nutricionales.")
         button_new.clicked.connect(self.open_new_analysis_dialog)
         button_open = CustomButton("./assets/open.svg", "Abrir Análisis", "Abre un análisis guardado y revisa la informacion obtenida.")
-
+        
         layout.addWidget(title)
         layout.addWidget(button_new)
         layout.addWidget(button_open)
@@ -370,29 +475,110 @@ class Home(QWidget):
 class MapCaptures(QWidget):
     def __init__(self):
         super().__init__()
+        self.init_ui()
+
+    def init_ui(self):
         layout = QVBoxLayout()
-        
-        # Crear un mapa con Folium
-        m = folium.Map(location=[-13.881719661927868, -73.03486801134967], 
-                       zoom_start=19,
-                        max_zoom=22, 
-                        tiles=f"https://api.mapbox.com/styles/v1/mapbox/satellite-v9/tiles/{{z}}/{{x}}/{{y}}?access_token={MAPBOX_TOKEN}",
-                        attr="Mapbox")
-        
-        df = pd.read_csv("./df_images_metadata.csv")
 
-        for latitud, longitude, name in zip(df["latitude"].to_list(),df["longitude"].to_list(), df["basename"].to_list()):
-            folium.CircleMarker(location=[latitud, longitude],  
-                                radius=6, 
-                                color='red', 
-                                fill=True, 
-                                fill_color='red', 
-                                fill_opacity=1,
-                                tooltip = name).add_to(m)
-        # Guardar el mapa en un archivo temporal
-        html_map = m._repr_html_()
+        #self.create_map()
 
-        # Estructura básica de una página HTML para incrustar el mapa
+        # Crear QWebEngineView
+        self.web_view = QWebEngineView()
+        self.update_map_view(path_data = "./df_images_metadata.csv")
+
+        # Sección inferior con barra de progreso y botón
+        processing_layout = QVBoxLayout()
+        progress_layout = QHBoxLayout()
+
+        processing_label = QLabel("Procesamiento")
+        processing_label.setStyleSheet("font-size: 18px; font-weight: bold; padding: 0px;")
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 2px solid grey;
+                border-radius: 5px;
+                text-align: center;
+            }
+            QProgressBar::chunk {
+                background-color: #76e900;
+                width: 20px;
+            }
+        """)
+        self.progress_bar.setMinimumWidth(400)
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setMaximum(100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFixedHeight(20)
+
+        start_button = QPushButton("Iniciar")
+        start_button.setStyleSheet("""
+            QPushButton {
+                background-color: #2d6a4f;
+                color: white;
+                border: 2px solid #1b4d3e;
+                border-radius: 5px;
+                padding: 10px 20px;
+                font-size: 16px;
+            }
+            QPushButton:hover {
+                background-color: #3a8d72;
+                border-color: #2c5e47;
+            }
+            QPushButton:pressed {
+                background-color: #1f4f39;
+            }
+        """)
+        start_button.clicked.connect(self.start_progress)
+
+        progress_layout.addWidget(self.progress_bar)
+        progress_layout.addWidget(start_button)
+
+        processing_layout.addWidget(processing_label)
+        processing_layout.addLayout(progress_layout)
+
+        layout.addWidget(self.web_view)
+        layout.addLayout(processing_layout)
+
+        layout.setStretchFactor(self.web_view, 9)
+        layout.setStretchFactor(processing_layout, 1)
+
+        self.setLayout(layout)
+
+    def create_map(self, path_data):
+        """Crea un nuevo mapa y actualiza los datos"""
+        self.m = folium.Map(
+            location=[-13.881719661927868, -73.03486801134967], 
+            zoom_start=19,
+            max_zoom=22, 
+            tiles=f"https://api.mapbox.com/styles/v1/mapbox/satellite-v9/tiles/{{z}}/{{x}}/{{y}}?access_token={MAPBOX_TOKEN}",
+            attr="Mapbox"
+        )
+        self.update_data(path_data)
+
+    def update_data(self, path_data):
+        """Actualiza los puntos en el mapa a partir del CSV"""
+        if path_data == None:
+            return
+        
+        df = pd.read_csv(path_data)
+
+        for lat, lon, name in zip(df["latitude"], df["longitude"], df["basename"]):
+            folium.CircleMarker(
+                location=[lat, lon],  
+                radius=6, 
+                color='red', 
+                fill=True, 
+                fill_color='red', 
+                fill_opacity=1,
+                tooltip=name
+            ).add_to(self.m)
+
+    def update_map_view(self, path_data):
+        self.create_map(path_data)
+
+        """Genera el HTML actualizado del mapa y lo muestra en la vista"""
+        html_map = self.m._repr_html_()
         html_page = f"""
         <!DOCTYPE html>
         <html>
@@ -407,75 +593,21 @@ class MapCaptures(QWidget):
         </body>
         </html>
         """
-        
-        # Mostrar el mapa en QWebEngineView
-        self.web_view = QWebEngineView()
         self.web_view.setHtml(html_page)
-        
-        # Seccion inferior
-        processing_layout = QVBoxLayout()
-        progress_layout = QHBoxLayout()
-        processing_label = QLabel("Procesamiento")
-        processing_label.setStyleSheet("font-size: 18px; font-weight: bold; padding: 0px;")
-        processing_bar = QProgressBar()
-        processing_bar.setStyleSheet("""
-    QProgressBar {
-        border: 2px solid grey;
-        border-radius: 5px;
-        text-align: center;
-    }
-    QProgressBar::chunk {
-        background-color: #76e900;
-        width: 20px;
-    }
-""")
-        processing_bar.setMinimumWidth(400)
-        processing_bar.setMinimum(0)
-        processing_bar.setMaximum(100)
-        processing_bar.setValue(0)
-        processing_bar.setFixedHeight(20)
-
-        self.progress_bar = processing_bar
-
-
-        start_button = QPushButton("Iniciar")
-        start_button.setStyleSheet("""
-    QPushButton {
-        background-color: #2d6a4f;  # Verde oscuro
-        color: white;  # Texto blanco
-        border: 2px solid #1b4d3e;  # Borde oscuro para resaltar
-        border-radius: 5px;  # Bordes redondeados
-        padding: 10px 20px;  # Espaciado dentro del botón
-        font-size: 16px;  # Tamaño de fuente
-    }
-    QPushButton:hover {
-        background-color: #3a8d72;  # Verde ligeramente más claro al pasar el mouse
-        border-color: #2c5e47;  # Cambiar el borde en hover
-    }
-    QPushButton:pressed {
-        background-color: #1f4f39;  # Verde más oscuro cuando se presiona
-    }
-""")
-        start_button.clicked.connect(self.start_progress)
-        progress_layout.addWidget(processing_bar)
-        progress_layout.addWidget(start_button)
-
-        processing_layout.addWidget(processing_label)
-        processing_layout.addLayout(progress_layout)
-
-        layout.addWidget(self.web_view)
-        layout.addLayout(processing_layout)
-         # Asignar factores de estiramiento
-        layout.setStretchFactor(self.web_view, 9)  # El primer widget ocupa el 80% (8 partes)
-        layout.setStretchFactor(processing_layout, 1)  # El segundo layout ocupa el 20% (2 partes)
-
-        self.setLayout(layout)
+    
+    def set_view(self, path_base, folder_name):
+        self.update_map_view(f"{path_base}/{folder_name}/image_metada.csv")
 
     def start_progress(self):
+        """Simula el progreso y actualiza el mapa al finalizar"""
         for i in range(101):
             self.progress_bar.setValue(i)
-            QApplication.processEvents()  # Esto permite que la interfaz se actualice
-            time.sleep(0.05)  # Simulando una tarea que tarda
+            QApplication.processEvents()
+            time.sleep(0.05)
+
+        # Simular actualización de datos y regenerar el mapa
+       
+        self.update_map_view()
 
 class MapTrees(QWidget):
     def __init__(self):
@@ -570,6 +702,7 @@ class MainWindow(QWidget):
         self.stack.setCurrentIndex(index)
 
     def on_finish_configure(self):
+        #self.page_map_images.update_map_view()
         self.navbar.setCurrentRow(1)  # Cambiar al segundo ítem del navbar
 
 if __name__ == "__main__":
