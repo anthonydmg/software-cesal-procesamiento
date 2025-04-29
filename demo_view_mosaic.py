@@ -99,6 +99,6 @@ class GeoTIFFViewer(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication([])
-    viewer = GeoTIFFViewer("./mosaico_10_images/tiles_mask_pyramid/zoom_1")
+    viewer = GeoTIFFViewer("./mosaico_10_images/tiles_pyramid/zoom_0")
     viewer.show()
     app.exec()

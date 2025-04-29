@@ -1,16 +1,17 @@
-from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QStackedWidget, QLabel, QListWidgetItem, QPushButton, QFrame, QProgressBar, QSizePolicy, QDialog, QLineEdit, QFileDialog, QTableWidget, QTableWidgetItem, QScrollArea
-from PySide6.QtGui import QIcon, QPixmap
-from PySide6.QtCore import Qt, QSize, Signal
+from PySide6.QtWidgets import QApplication, QWidget, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QVBoxLayout, QHBoxLayout, QListWidget, QStackedWidget, QLabel, QListWidgetItem, QPushButton, QFrame, QProgressBar, QSizePolicy, QDialog, QLineEdit, QFileDialog, QTableWidget, QTableWidgetItem, QScrollArea
+from PySide6.QtGui import QIcon, QImage, QPixmap, QPainter
+from PySide6.QtCore import Qt, QSize, Signal, QRectF
 import os
 import folium
 from PySide6.QtWebEngineWidgets import QWebEngineView
 import pandas as pd
 import time
-
+import re
 from dotenv import load_dotenv
-
+from osgeo import gdal
 from utils import get_gps_coordinates, get_image_resolution, get_metadata
-
+import numpy as np
+from tempfile import mkstemp
 load_dotenv()
 
 MAPBOX_TOKEN = os.getenv("MAPBOX_TOKEN")
@@ -473,8 +474,9 @@ class Home(QWidget):
         dialog.exec()
  
 class MapCaptures(QWidget):
-    def __init__(self):
+    def __init__(self, main_window):
         super().__init__()
+        self.main_window=main_window
         self.init_ui()
 
     def init_ui(self):
@@ -604,10 +606,146 @@ class MapCaptures(QWidget):
             self.progress_bar.setValue(i)
             QApplication.processEvents()
             time.sleep(0.05)
-
+            
+        self.main_window.switch_page(2)
         # Simular actualización de datos y regenerar el mapa
        
         self.update_map_view()
+
+class GeoTIFFViewer(QWidget):
+    def __init__(self, mosaic_dir, mask_dir, parent=None):
+        super().__init__(parent)
+        self.mosaic_dir = mosaic_dir
+        self.mask_dir = mask_dir
+        
+        self.init_ui()
+        self.load_layers()
+
+    def init_ui(self):
+        """Inicializa la interfaz del widget"""
+        self.layout = QVBoxLayout(self)
+        
+        # Configuración de la vista
+        self.scene = QGraphicsScene()
+        self.view = QGraphicsView(self.scene)
+        self.view.setDragMode(QGraphicsView.ScrollHandDrag)
+        self.view.setRenderHint(QPainter.Antialiasing)
+        
+        # Añadir vista al layout
+        self.layout.addWidget(self.view)
+
+    def load_layers(self):
+        """Carga ambas capas (mosaico y máscara)"""
+        self.load_tiles(self.mosaic_dir, is_mask=False)
+        self.load_tiles(self.mask_dir, is_mask=True)
+        self.view.fitInView(self.scene.itemsBoundingRect(), Qt.KeepAspectRatio)
+
+    def load_tiles(self, tiles_dir, is_mask):
+        """Carga tiles individuales"""
+        for tile_file in os.listdir(tiles_dir):
+            if not tile_file.endswith(".tif"):
+                continue
+                
+            match = re.search(r"tile_(\d+)_(\d+)\.tif", tile_file)
+            if not match:
+                continue
+                
+            x_pos, y_pos = map(int, match.groups())
+            tile_path = os.path.join(tiles_dir, tile_file)
+            
+            qimage = self.mask_to_qimage(tile_path) if is_mask else self.geotiff_to_qimage(tile_path)
+            if not qimage.isNull():
+                item = QGraphicsPixmapItem(QPixmap.fromImage(qimage))
+                item.setPos(x_pos, y_pos)
+                if is_mask:
+                    item.setZValue(1)
+                self.scene.addItem(item)
+
+    def geotiff_to_qimage(self, path):
+        """Convierte GeoTIFF a QImage"""
+        ds = gdal.Open(path)
+        if not ds:
+            return QImage()
+        
+        bands = [ds.GetRasterBand(i+1).ReadAsArray() for i in range(min(3, ds.RasterCount))]
+        if bands[0].dtype != np.uint8:
+            bands = [(b * 255 / (b.max() or 1)).astype(np.uint8) for b in bands]
+        
+        height, width = bands[0].shape
+        rgb = np.dstack(bands[:3]) if len(bands) >= 3 else np.dstack([bands[0]]*3)
+        
+        return QImage(rgb.data, width, height, 3 * width, QImage.Format_RGB888).copy()
+
+    def mask_to_qimage(self, path):
+        """Convierte máscara a QImage transparente"""
+        ds = gdal.Open(path)
+        if not ds:
+            return QImage()
+        
+        mask = ds.GetRasterBand(1).ReadAsArray()
+        height, width = mask.shape
+        rgba = np.zeros((height, width, 4), dtype=np.uint8)
+        rgba[mask > 0] = [0, 255, 0, 128]  # Verde semitransparente
+        
+        return QImage(rgba.data, width, height, 4 * width, QImage.Format_RGBA8888).copy()
+
+    def save_scene_to_image(self):
+        """Guarda la escena actual como imagen temporal"""
+        try:
+            view_rect = self.view.viewport().rect()
+            target_rect = self.view.mapToScene(view_rect).boundingRect()
+            
+            fd, temp_path = mkstemp(suffix='.png')
+            os.close(fd)
+            
+            img = QImage(target_rect.size().toSize(), QImage.Format_ARGB32)
+            img.fill(Qt.transparent)
+            
+            painter = QPainter(img)
+            self.scene.render(painter, 
+                            target=QRectF(img.rect()), 
+                            source=target_rect)
+            painter.end()
+            
+            if img.save(temp_path):
+                return temp_path
+            return None
+            
+        except Exception as e:
+            print(f"Error al guardar imagen: {str(e)}")
+            return None
+
+    def wheelEvent(self, event):
+        """Control de zoom"""
+        factor = 1.1 ** (event.angleDelta().y() / 120)
+        self.view.scale(factor, factor)
+
+class MosaicView(QWidget):
+    def __init__(self, main_window):
+        super().__init__()
+        self.main_window = main_window
+        # Configuración de la vista
+        
+        # Cargar y mostrar las capas
+        self.setup_ui()
+        
+        # Debug: Mostrar información de carga
+    
+    def setup_ui(self):
+        """Configura la interfaz de usuario"""
+
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+         # Crear instancia del visualizador
+        self.viewer = GeoTIFFViewer(
+            mosaic_dir="./mosaico_10_images/tiles_pyramid/zoom_0",
+            mask_dir="./mosaico_10_images/tiles_mask_pyramid/zoom_0",
+            parent=self
+        )
+        
+        layout.addWidget(self.viewer)
+        
+ 
 
 class MapTrees(QWidget):
     def __init__(self):
@@ -686,8 +824,8 @@ class MainWindow(QWidget):
         self.stack = QStackedWidget()
         # Contenido
         self.page_home = Home(main_window=self)
-        self.page_map_images = MapCaptures()
-        self.page_map_trees= MapTrees()
+        self.page_map_images = MapCaptures(main_window=self)
+        self.page_map_trees= MosaicView(main_window=self) #MapTrees()
 
         self.stack.addWidget(self.page_home)
         self.stack.addWidget(self.page_map_images)

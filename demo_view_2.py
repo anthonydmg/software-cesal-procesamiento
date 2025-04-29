@@ -17,161 +17,177 @@ class GeoTIFFViewer(QMainWindow):
         # Configuración de directorios
         self.mosaic_dir = mosaic_dir
         self.mask_dir = mask_dir
-        self.current_zoom = 0
-        self.max_zoom = self.detect_max_zoom()
         
-        # Escena gráfica con dos capas
+        # Configuración de la vista
         self.scene = QGraphicsScene()
         self.view = QGraphicsView(self.scene)
         self.view.setDragMode(QGraphicsView.ScrollHandDrag)
         self.view.setRenderHint(QPainter.Antialiasing)
         
-        # Interfaz de usuario
+        # Cargar y mostrar las capas
         self.setup_ui()
-        self.load_zoom_level(self.current_zoom)
+        self.load_layers()
+        
+        # Debug: Mostrar información de carga
+        print(f"Tiles de mosaico cargados: {len(os.listdir(mosaic_dir))}")
+        print(f"Tiles de máscara cargados: {len(os.listdir(mask_dir))}")
 
     def setup_ui(self):
-        """Configura la interfaz con selector de zoom"""
+        """Configura la interfaz de usuario"""
+
         layout = QVBoxLayout()
-        
-        # Selector de zoom
-        self.zoom_combo = QComboBox()
-        self.zoom_combo.addItems([f"Zoom {i}" for i in range(self.max_zoom + 1)])
-        self.zoom_combo.currentIndexChanged.connect(self.change_zoom_level)
-        
-        layout.addWidget(QLabel("Nivel de Zoom:"))
-        layout.addWidget(self.zoom_combo)
         layout.addWidget(self.view)
         
         container = QWidget()
         container.setLayout(layout)
         self.setCentralWidget(container)
 
-    def detect_max_zoom(self):
-        """Detecta el máximo nivel de zoom disponible"""
-        max_z = 0
-        while os.path.exists(os.path.join(self.mosaic_dir, f"zoom_{max_z}")):
-            max_z += 1
-        return max_z - 1 if max_z > 0 else 0
-
-    def change_zoom_level(self, zoom_level):
-        """Cambia entre niveles de zoom"""
-        self.current_zoom = zoom_level
-        self.scene.clear()
-        self.load_zoom_level(zoom_level)
-
-    def load_zoom_level(self, zoom_level):
-        """Carga ambas capas (mosaico y máscara) para el nivel de zoom actual"""
-        zoom_dir_mosaic = os.path.join(self.mosaic_dir, f"zoom_{zoom_level}")
-        zoom_dir_mask = os.path.join(self.mask_dir, f"zoom_{zoom_level}")
-        
-        if not os.path.exists(zoom_dir_mosaic) or not os.path.exists(zoom_dir_mask):
-            print(f"Directorios no encontrados para zoom {zoom_level}")
-            return
-        
-        # Primero cargar el mosaico (capa base)
-        self.load_tiles(zoom_dir_mosaic, is_mask=False)
-        
-        # Luego cargar la máscara (capa superior)
-        self.load_tiles(zoom_dir_mask, is_mask=True)
-        
-        # Ajustar vista
-        self.view.fitInView(self.scene.itemsBoundingRect(), Qt.KeepAspectRatio)
-
-    def load_tiles(self, zoom_dir, is_mask):
-        """Carga tiles de mosaico o máscara según el parámetro is_mask"""
-        for tile_file in os.listdir(zoom_dir):
-            if not tile_file.startswith("tile_") or not tile_file.endswith(".tif"):
-                continue
+    def load_layers(self):
+        """Carga ambas capas verificando errores"""
+        try:
+            # Verificar existencia de directorios
+            if not os.path.exists(self.mosaic_dir):
+                raise FileNotFoundError(f"Directorio no encontrado: {self.mosaic_dir}")
+            if not os.path.exists(self.mask_dir):
+                raise FileNotFoundError(f"Directorio no encontrado: {self.mask_dir}")
                 
-            match = re.search(r"tile_(\d+)_(\d+)\.tif", tile_file)
-            if not match:
-                continue
-                
-            x_pos = int(match.group(1)) // (2 ** self.current_zoom)
-            y_pos = int(match.group(2)) // (2 ** self.current_zoom)
+            # Cargar capas
+            self.load_tiles(self.mosaic_dir, is_mask=False)
+            self.load_tiles(self.mask_dir, is_mask=True)
             
-            tile_path = os.path.join(zoom_dir, tile_file)
-            
-            if is_mask:
-                qimage = self.mask_to_qimage(tile_path)
+            # Ajustar vista
+            if self.scene.items():
+                self.view.fitInView(self.scene.itemsBoundingRect(), Qt.KeepAspectRatio)
             else:
-                qimage = self.geotiff_to_qimage(tile_path)
-            
-            if qimage:
-                item = QGraphicsPixmapItem(QPixmap.fromImage(qimage))
+                print("Advertencia: No se cargaron tiles")
+                
+        except Exception as e:
+            print(f"Error al cargar capas: {str(e)}")
+
+    def load_tiles(self, tiles_dir, is_mask):
+        """Carga tiles con verificación de errores"""
+        try:
+            for tile_file in sorted(os.listdir(tiles_dir)):
+                if not (tile_file.startswith("tile_") and tile_file.endswith(".tif")):
+                    continue
+                    
+                # Extraer coordenadas
+                match = re.search(r"tile_(\d+)_(\d+)\.tif", tile_file)
+                if not match:
+                    print(f"Formato de nombre incorrecto: {tile_file}")
+                    continue
+                    
+                x_pos, y_pos = map(int, match.groups())
+                tile_path = os.path.join(tiles_dir, tile_file)
+                
+                # Debug: Verificar existencia de archivo
+                if not os.path.exists(tile_path):
+                    print(f"Archivo no encontrado: {tile_path}")
+                    continue
+                
+                # Convertir a QImage
+                qimage = self.mask_to_qimage(tile_path) if is_mask else self.geotiff_to_qimage(tile_path)
+                if qimage.isNull():
+                    print(f"Error al convertir imagen: {tile_path}")
+                    continue
+                
+                # Crear item y añadir a escena
+                pixmap = QPixmap.fromImage(qimage)
+                if pixmap.isNull():
+                    print(f"Error al crear QPixmap: {tile_path}")
+                    continue
+                    
+                item = QGraphicsPixmapItem(pixmap)
                 item.setPos(x_pos, y_pos)
-                
-                # La máscara se coloca encima del mosaico
                 if is_mask:
-                    item.setZValue(1)  # Capa superior
-                
+                    item.setZValue(1)
                 self.scene.addItem(item)
+                
+                # Debug: Mostrar información del tile cargado
+                print(f"Cargado {'máscara' if is_mask else 'mosaico'}: {tile_file} en ({x_pos}, {y_pos})")
+                
+        except Exception as e:
+            print(f"Error al cargar tiles: {str(e)}")
 
     def geotiff_to_qimage(self, geotiff_path):
-        """Convierte GeoTIFF del mosaico a QImage"""
-        ds = gdal.Open(geotiff_path)
-        if not ds:
-            print(f"Error al abrir mosaico: {geotiff_path}")
-            return None
-        
-        # Leer bandas RGB
-        bands = [ds.GetRasterBand(i+1).ReadAsArray() for i in range(min(3, ds.RasterCount))]
-        
-        # Convertir a 8-bit si es necesario
-        if bands[0].dtype != np.uint8:
-            bands = [(band * 255 / band.max()).astype(np.uint8) for band in bands]
-        
-        # Crear QImage (BGR -> RGB)
-        height, width = bands[0].shape
-        if len(bands) >= 3:
-            rgb = np.dstack((bands[2], bands[1], bands[0]))
-        else:
-            rgb = np.dstack([bands[0]]*3)
-        
-        return QImage(rgb.data, width, height, 3 * width, QImage.Format_RGB888).copy()
+        """Conversión robusta de GeoTIFF a QImage"""
+        try:
+            ds = gdal.Open(geotiff_path)
+            if not ds:
+                print(f"No se pudo abrir: {geotiff_path}")
+                return QImage()
+            
+            # Leer bandas
+            bands = []
+            for i in range(min(3, ds.RasterCount)):
+                band = ds.GetRasterBand(i+1)
+                arr = band.ReadAsArray()
+                if arr is None:
+                    print(f"Error al leer banda {i+1} de {geotiff_path}")
+                    return QImage()
+                
+                # Normalizar a 8-bit si es necesario
+                if arr.dtype != np.uint8:
+                    arr = (arr * 255 / (arr.max() or 1)).astype(np.uint8)
+                bands.append(arr)
+            
+            # Crear imagen RGB
+            height, width = bands[0].shape
+            if len(bands) >= 3:
+                rgb = np.dstack((bands[0], bands[1], bands[2]))  # BGR a RGB
+            else:
+                rgb = np.dstack([bands[0]]*3)  # Escala de grises a RGB
+            
+            # Crear QImage asegurando que los datos persistan
+            rgb_contiguous = np.ascontiguousarray(rgb)
+            return QImage(rgb_contiguous.data, width, height, 3 * width, QImage.Format_RGB888).copy()
+            
+        except Exception as e:
+            print(f"Error en geotiff_to_qimage: {str(e)}")
+            return QImage()
 
     def mask_to_qimage(self, mask_path):
-        """Convierte la máscara binaria a QImage transparente con áreas verdes"""
-        ds = gdal.Open(mask_path)
-        if not ds:
-            print(f"Error al abrir máscara: {mask_path}")
-            return None
-        
-        # Leer máscara (1 banda)
-        mask_array = ds.GetRasterBand(1).ReadAsArray()
-        
-        # Crear imagen RGBA (32-bit)
-        height, width = mask_array.shape
-        rgba = np.zeros((height, width, 4), dtype=np.uint8)
-        
-        # Áreas con árboles (valor > 0) -> verde semitransparente
-        tree_mask = mask_array > 0
-        rgba[tree_mask] = [0, 255, 0, 64]  # RGBA: verde con 25% opacidad
-        
-        # Áreas sin árboles -> completamente transparentes
-        rgba[~tree_mask] = [0, 0, 0, 0]
-        
-        return QImage(rgba.data, width, height, 4 * width, QImage.Format_RGBA8888).copy()
+        """Conversión robusta de máscara a QImage transparente"""
+        try:
+            ds = gdal.Open(mask_path)
+            if not ds:
+                print(f"No se pudo abrir: {mask_path}")
+                return QImage()
+            
+            # Leer máscara
+            mask_array = ds.GetRasterBand(1).ReadAsArray()
+            if mask_array is None:
+                print(f"Error al leer máscara: {mask_path}")
+                return QImage()
+            
+            height, width = mask_array.shape
+            rgba = np.zeros((height, width, 4), dtype=np.uint8)
+            
+            # Aplicar máscara (verde semitransparente donde haya valores > 0)
+            tree_mask = mask_array > 0
+            rgba[tree_mask] = [0, 255, 0, 128]  # Verde con 50% opacidad
+            rgba[~tree_mask] = [0, 0, 0, 0]     # Transparente
+            
+            # Crear QImage asegurando que los datos persistan
+            rgba_contiguous = np.ascontiguousarray(rgba)
+            return QImage(rgba_contiguous.data, width, height, 4 * width, QImage.Format_RGBA8888).copy()
+            
+        except Exception as e:
+            print(f"Error en mask_to_qimage: {str(e)}")
+            return QImage()
 
     def wheelEvent(self, event):
-        """Control de zoom con la rueda del mouse"""
-        zoom_delta = event.angleDelta().y()
-        
-        if zoom_delta > 0 and self.current_zoom < self.max_zoom:
-            self.current_zoom += 1
-            self.zoom_combo.setCurrentIndex(self.current_zoom)
-        elif zoom_delta < 0 and self.current_zoom > 0:
-            self.current_zoom -= 1
-            self.zoom_combo.setCurrentIndex(self.current_zoom)
+        """Zoom con la rueda del mouse"""
+        factor = 1.1 ** (event.angleDelta().y() / 120)
+        self.view.scale(factor, factor)
 
 if __name__ == "__main__":
     app = QApplication([])
     
     # Directorios deben tener la misma estructura de zoom levels
     viewer = GeoTIFFViewer(
-        mosaic_dir="./mosaico_10_images/tiles_pyramid",
-        mask_dir="./mosaico_10_images/tiles_mask_pyramid"
+        mosaic_dir="./mosaico_10_images/tiles_pyramid/zoom_0",
+        mask_dir="./mosaico_10_images/tiles_mask_pyramid/zoom_0"
     )
     viewer.show()
     app.exec()
