@@ -1,6 +1,6 @@
-from PySide6.QtWidgets import QApplication, QWidget, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QVBoxLayout, QHBoxLayout, QListWidget, QStackedWidget, QLabel, QListWidgetItem, QPushButton, QFrame, QProgressBar, QSizePolicy, QDialog, QLineEdit, QFileDialog, QTableWidget, QTableWidgetItem, QScrollArea
-from PySide6.QtGui import QIcon, QImage, QPixmap, QPainter
-from PySide6.QtCore import Qt, QSize, Signal, QRectF
+from PySide6.QtWidgets import QApplication, QWidget, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QVBoxLayout, QHBoxLayout, QListWidget, QStackedWidget, QLabel, QListWidgetItem, QPushButton, QFrame, QProgressBar, QSizePolicy, QDialog, QLineEdit, QFileDialog, QTableWidget, QTableWidgetItem, QScrollArea, QGroupBox,  QFrame, QSizePolicy
+from PySide6.QtGui import QIcon, QImage, QPixmap, QPainter, QPalette, QColor
+from PySide6.QtCore import Qt, QSize, Signal, QRectF, QMutex, Signal, Slot, Qt, QThread, QObject
 import os
 import folium
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -12,12 +12,232 @@ from osgeo import gdal
 from utils import get_gps_coordinates, get_image_resolution, get_metadata
 import numpy as np
 from tempfile import mkstemp
+import torch
+from sahi import AutoDetectionModel
+from sahi.predict import get_prediction
+from datetime import datetime
+import traceback
+import gc
+import json
+import random
+
 load_dotenv()
 
 MAPBOX_TOKEN = os.getenv("MAPBOX_TOKEN")
 
-
 import sys
+
+class MemoryAwareYOLOModel:
+    _instance = None
+    _mutex = QMutex()
+    
+    def __init__(self):
+        if MemoryAwareYOLOModel._instance is not None:
+            raise Exception("Esta clase es un singleton. Usa get_instance()")
+        
+        self.device = self._select_device()
+        print("self.device:", self.device)
+        self.model = self._load_model()
+        
+    @classmethod
+    def get_instance(cls):
+        cls._mutex.lock()
+        try:
+            if cls._instance is None:
+                cls._instance = MemoryAwareYOLOModel()
+            return cls._instance
+        finally:
+            cls._mutex.unlock()
+    
+    def _select_device(self):
+        if torch.cuda.is_available():
+            torch.backends.cudnn.benchmark = True
+            return "cuda"
+        return "cpu"
+    
+    def _load_model(self):
+        model = AutoDetectionModel.from_pretrained(
+            model_type='yolo11',
+            model_path='./yolo11s-seg-finituned.pt',
+            confidence_threshold=0.5,
+            device=self.device,
+        )
+        if hasattr(model, 'model'):
+            for param in model.model.parameters():
+                param.requires_grad = False
+        return model
+    
+    def predict_with_memory_management(self, image_path: str):
+        try:
+            if not os.path.exists(image_path):
+                raise FileNotFoundError(f"Imagen no encontrada: {image_path}")
+            
+            self._clean_memory()
+            print("image_path:", image_path)
+            result = get_prediction(image_path, self.model)
+            print("result:", result)
+            predictions = {
+                'bboxes': [], 
+                #'masks': [], 
+                'segmentations': [],
+                'classes': [], 
+                'scores': [], 
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            for obj in result.object_prediction_list:
+                seg = self._process_segmentation(obj.mask.segmentation)
+                predictions['bboxes'].append(obj.bbox.to_xywh())
+                #predictions['masks'].append(obj.mask.bool_mask.tolist())
+                predictions['segmentations'].append(seg)
+                predictions['classes'].append(obj.category.name)
+                predictions['scores'].append(obj.score.value)
+            
+            return predictions
+            
+        except Exception as e:
+            print(f"Error en predicción: {str(e)}")
+            traceback.print_exc()
+            return None
+        finally:
+            self._clean_memory()
+    
+    def _process_segmentation(self, segmentation):
+        if isinstance(segmentation, list):
+            if all(isinstance(v, (int, float)) for v in segmentation):
+                return np.array(segmentation, dtype=np.int32).reshape((-1, 2)).tolist()
+            elif all(isinstance(v, list) for v in segmentation):
+                return [np.array(s, dtype=np.int32).reshape((-1, 2)).tolist() for s in segmentation]
+        return segmentation
+    
+    def _clean_memory(self):
+        gc.collect()
+        if self.device.startswith('cuda'):
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+
+class ResultStorage:
+    def __init__(self, output_dir: str = "results"):
+        self.mutex = QMutex()
+        self.output_dir = output_dir
+        os.makedirs(f"./{self.output_dir}", exist_ok=True)
+        self.current_file_index = 0
+        self.results_cache = {}
+        self.partial_files = []
+    def add_result(self, image_id, result):
+        self.mutex.lock()
+        try:
+            self.results_cache[image_id] = result
+            self._save_to_disk()
+        finally:
+            self.mutex.unlock()
+    
+    def _save_to_disk(self):
+        if not self.results_cache:
+            return
+        os.makedirs(f"./{self.output_dir}", exist_ok=True)     
+        output_file =f"./{self.output_dir}/results_{self.current_file_index}.json" #os.path.join(self.output_dir, f"results_{self.current_file_index}.json")
+        try:
+            with open(output_file, 'w') as f:
+                json.dump(self.results_cache, f, indent=2)
+            print(f"Resultados guardados en: {output_file}")
+            self.current_file_index += 1
+            self.partial_files.append(output_file)
+            self.results_cache = {}
+        except Exception as e:
+            print(f"Error al guardar resultados: {str(e)}")
+            traceback.print_exc()
+    
+    def save_remaining(self):
+        self._save_to_disk()
+  
+    def merge_results(self, final_filename: str = "final_results.json"):
+        self.mutex.lock()
+        try:
+            final_results = {}
+            
+            # Leer todos los archivos parciales
+            for partial_file in self.partial_files:
+                try:
+                    with open(partial_file, 'r') as f:
+                        data = json.load(f)
+                        final_results.update(data)
+                except Exception as e:
+                    print(f"Error leyendo {partial_file}: {str(e)}")
+                    continue
+            print("final_results:", final_results.keys())
+            # Guardar archivo final
+            final_path = os.path.join(self.output_dir, final_filename)
+            with open(final_path, 'w') as f:
+                json.dump(final_results, f, indent=2)
+            
+            # Opcional: eliminar archivos parciales
+            for partial_file in self.partial_files:
+                try:
+                    os.remove(partial_file)
+                except:
+                    pass
+            
+            return final_path
+        finally:
+            self.mutex.unlock()    
+
+
+class ImageProcessor(QObject):
+    progress_updated = Signal(int)  # progress, message, current, total
+    finished = Signal()
+
+    def __init__(self, image_data, result_storage):
+        super().__init__()
+        self.image_data = image_data
+        self.result_storage = result_storage
+        self.is_running = True
+        self.batch_size = 2
+        self.model = MemoryAwareYOLOModel.get_instance()
+
+    def process(self):
+        try:
+            total = len(self.image_data)
+            processed = 0
+            batch_results = {}
+
+            for img_id, img_data in self.image_data.items():
+                if not self.is_running:
+                    break
+
+                img_path = img_data['img_relative_path']
+                try:
+                    result = self.model.predict_with_memory_management(img_path)
+                    if result:
+                        # Guardar resultado inmediatamente
+                        print("Enviando a agregar resultados")
+                        self.result_storage.add_result(img_id, {
+                            'image_path': img_path,
+                            'results': result,
+                            'processed_at': datetime.now().isoformat()
+                        })
+                        print("Termino de a agregar nuevo resultados")
+                        processed += 1
+                        progress = int((processed / total) * 100)
+                        self.progress_updated.emit(
+                            progress 
+                        )
+
+                        if processed % self.batch_size == 0:
+                            batch_results = {}
+                            QThread.msleep(100)
+
+                except Exception as e:
+                    print(f"Error en {img_id}: {str(e)}")
+            final_path = self.result_storage.merge_results()
+            self.finished.emit()
+
+        except Exception as e:
+            self.error_occurred.emit(f"Error en el procesador: {str(e)}")
+            traceback.print_exc()
+
+    def stop(self):
+        self.is_running = False
 
 class InitialConfigureScreen(QFrame):
     def __init__(self, parent = None, dialog_parent=None):
@@ -67,6 +287,8 @@ class InitialConfigureScreen(QFrame):
     
     def go_to_image_selection_screen(self):
         """Crea la carpeta del análisis y avanza a la siguiente pantalla."""
+
+        
         name = self.name_input.text().strip()
         folder_path = self.folder_input.text().strip()
         # Construir la ruta final
@@ -76,6 +298,10 @@ class InitialConfigureScreen(QFrame):
             os.makedirs(final_path, exist_ok=True)  # Crea la carpeta si no existe
             print(f"Carpeta creada: {final_path}")  # Debug (puedes eliminar esto después)
 
+            self.dialog_parent.new_analysis_data_store.set_base_dir(final_path)
+
+           
+            self.dialog_parent.new_analysis_data_store.set_name(name)
             # Llamar al método para cambiar de pantalla
             self.dialog_parent.go_to_image_selection_screen()
         except Exception as e:
@@ -211,7 +437,9 @@ class ImageSelectionScreen(QFrame):
 
             # Leer metadatos
             metadata = self.get_exif_data(path)
+            
             if metadata:
+                self.dialog_parent.new_analysis_data_store.add_image_data(i, dict(img_relative_path = path, **metadata))
                 metadata_list.append([
                     metadata["name"],
                     metadata["image_width"],
@@ -224,7 +452,7 @@ class ImageSelectionScreen(QFrame):
                     metadata["DateTimeOriginal"],
                 ])
         
-        self.dialog_parent.image_data_screen.load_metadata(metadata_list)
+        #self.dialog_parent.image_data_screen.load_metadata(metadata_list)
 
         self.dialog_parent.go_to_image_data_table()
     
@@ -259,7 +487,6 @@ class ImageSelectionScreen(QFrame):
         }
        
         return metadata_data
-      
 
 class ImageDataTableScreen(QFrame):
     finished_configure = Signal()
@@ -300,7 +527,27 @@ class ImageDataTableScreen(QFrame):
 
         self.setLayout(layout)
     
+    def update_data_table(self, images_data):
+        table_data = [[ metadata["name"],
+            metadata["image_width"],
+            metadata["image_height"],
+            metadata["latitude"],
+            metadata["longitude"],
+            metadata["yaw_degree"],
+            metadata["pitch_degree"],
+            metadata["roll_degree"],
+            metadata["DateTimeOriginal"],
+                ] for metadata in images_data.values()]
+
+        self.table.setRowCount(0)
+        for data in table_data:
+            row_position = self.table.rowCount()
+            self.table.insertRow(row_position)
+            for column, value in enumerate(data):
+                self.table.setItem(row_position, column, QTableWidgetItem(str(value)))
+
     def load_metadata(self, metadata_list):
+        print("metadata_list:", metadata_list)
         self.table.setRowCount(0)
         for data in metadata_list:
             row_position = self.table.rowCount()
@@ -339,6 +586,7 @@ class NewAnalysisDialog(QDialog):
         self.setLayout(QVBoxLayout())
         self.layout().addWidget(self.stacked_widget)
 
+        self.new_analysis_data_store = AnalysisData()
         # Crear pantallas
         self.initial_screen = InitialConfigureScreen(dialog_parent = self)
 
@@ -346,14 +594,14 @@ class NewAnalysisDialog(QDialog):
         self.image_selection_screen = ImageSelectionScreen(dialog_parent = self)
 
         self.image_data_screen = ImageDataTableScreen(dialog_parent = self)
-        #
+        #ImageDataTableScreen
         self.stacked_widget.addWidget(self.initial_screen)
         self.stacked_widget.addWidget(self.image_selection_screen)
         self.stacked_widget.addWidget(self.image_data_screen)
 
         self.current_step = 0  # Variable para llevar el control de los pasos
         self.stacked_widget.setCurrentIndex(self.current_step)  # Mostrar la pantalla inicial
-
+    
     def save_metadata(self, columns, metadata):
         df = pd.DataFrame(metadata, columns=columns)
         name =  self.initial_screen.name_input.text().strip()
@@ -376,6 +624,8 @@ class NewAnalysisDialog(QDialog):
         self.stacked_widget.setCurrentIndex(0)
 
     def go_to_image_data_table(self):
+        print("self.new_analysis_data_store.images_data:", self.new_analysis_data_store.images_data)
+        self.image_data_screen.update_data_table(self.new_analysis_data_store.images_data)
         """Método para ir al paso de tabla de datos de imagen"""
         self.stacked_widget.setCurrentIndex(2)
 
@@ -470,7 +720,12 @@ class Home(QWidget):
   
     def open_new_analysis_dialog(self):
         dialog = NewAnalysisDialog(self)
-        dialog.image_data_screen.finished_configure.connect(self.main_window.on_finish_configure)
+        
+        def handle_finished_configure():
+            self.main_window.update_analysis_data(dialog.new_analysis_data_store)
+        
+        dialog.image_data_screen.finished_configure.connect(handle_finished_configure)
+
         dialog.exec()
  
 class MapCaptures(QWidget):
@@ -478,6 +733,7 @@ class MapCaptures(QWidget):
         super().__init__()
         self.main_window=main_window
         self.init_ui()
+        self.setup_variables()
 
     def init_ui(self):
         layout = QVBoxLayout()
@@ -486,7 +742,9 @@ class MapCaptures(QWidget):
 
         # Crear QWebEngineView
         self.web_view = QWebEngineView()
-        self.update_map_view(path_data = "./df_images_metadata.csv")
+        self.images_data = {}
+
+        self.update_map_view(images_data = self.images_data)
 
         # Sección inferior con barra de progreso y botón
         processing_layout = QVBoxLayout()
@@ -547,7 +805,7 @@ class MapCaptures(QWidget):
 
         self.setLayout(layout)
 
-    def create_map(self, path_data):
+    def create_map(self, images_data):
         """Crea un nuevo mapa y actualiza los datos"""
         self.m = folium.Map(
             location=[-13.881719661927868, -73.03486801134967], 
@@ -556,19 +814,18 @@ class MapCaptures(QWidget):
             tiles=f"https://api.mapbox.com/styles/v1/mapbox/satellite-v9/tiles/{{z}}/{{x}}/{{y}}?access_token={MAPBOX_TOKEN}",
             attr="Mapbox"
         )
-        self.update_data(path_data)
+        self.update_data(images_data)
 
-    def update_data(self, path_data):
+    def update_data(self, images_data):
         """Actualiza los puntos en el mapa a partir del CSV"""
-        if path_data == None:
+        if images_data == None or len(images_data) == 0:
             return
         
-        df = pd.read_csv(path_data)
-
-        for lat, lon, name in zip(df["latitude"], df["longitude"], df["basename"]):
+        for id, metadata in images_data.items():
+            lat, lon, name = metadata["latitude"], metadata["longitude"], metadata["name"]
             folium.CircleMarker(
                 location=[lat, lon],  
-                radius=6, 
+                radius=5, 
                 color='red', 
                 fill=True, 
                 fill_color='red', 
@@ -576,8 +833,20 @@ class MapCaptures(QWidget):
                 tooltip=name
             ).add_to(self.m)
 
-    def update_map_view(self, path_data):
-        self.create_map(path_data)
+        #for lat, lon, name in zip(df["latitude"], df["longitude"], df["basename"]):
+        #    folium.CircleMarker(
+        #        location=[lat, lon],  
+        #        radius=6, 
+        #        color='red', 
+        #        fill=True, 
+        #        fill_color='red', 
+        #        fill_opacity=1,
+        #        tooltip=name
+        #    ).add_to(self.m)
+
+    def update_map_view(self, images_data):
+        self.images_data = images_data
+        self.create_map(images_data)
 
         """Genera el HTML actualizado del mapa y lo muestra en la vista"""
         html_map = self.m._repr_html_()
@@ -601,22 +870,61 @@ class MapCaptures(QWidget):
         self.update_map_view(f"{path_base}/{folder_name}/image_metada.csv")
 
     def start_progress(self):
+        
         """Simula el progreso y actualiza el mapa al finalizar"""
-        for i in range(101):
-            self.progress_bar.setValue(i)
-            QApplication.processEvents()
-            time.sleep(0.05)
+        self.images_data = self.main_window.analysis_data_store.images_data
+        self.setup_processing_thread()
+        #for i in range(101):
+        #    self.progress_bar.setValue(i)
+        #    QApplication.processEvents()
+        #    time.sleep(0.05)
             
-        self.main_window.switch_page(2)
+        #self.main_window.switch_page(2)
         # Simular actualización de datos y regenerar el mapa
-       
-        self.update_map_view()
+    
+        #self.update_map_view()
+    def setup_variables(self):
+        self.processor_thread = None
+        self.processor = None
+        self.result_storage = ResultStorage(output_dir="segmentacion_results")
+        self.image_data = {}
+
+    def setup_processing_thread(self):
+        self.processor_thread = QThread()
+        self.processor = ImageProcessor(self.images_data, self.result_storage)
+        self.processor.moveToThread(self.processor_thread)
+
+        self.processor_thread.started.connect(self.processor.process)
+        self.processor.progress_updated.connect(self.update_progrees_bar)
+        self.processor.finished.connect(self.processing_finished)
+
+        self.processor.finished.connect(self.processor_thread.quit)
+        self.processor.finished.connect(self.processor.deleteLater)
+        self.processor_thread.finished.connect(self.processor_thread.deleteLater)
+
+        self.processor_thread.start()
+
+    @Slot(int)
+    def update_progrees_bar(self, progress):
+        self.progress_bar.setValue(progress)
+
+    @Slot()
+    def processing_finished(self):
+        self.result_storage.save_remaining()
+        self.cleanup_processing()
+        self.main_window.switch_page(2)
+
+    def cleanup_processing(self):
+        if self.processor_thread and self.processor_thread.isRunning():
+            self.processor_thread.quit()
+            self.processor_thread.wait()
 
 class GeoTIFFViewer(QWidget):
-    def __init__(self, mosaic_dir, mask_dir, parent=None):
+    def __init__(self, mosaic_dir, mask_dir, masks_dirs  = None, parent=None):
         super().__init__(parent)
         self.mosaic_dir = mosaic_dir
         self.mask_dir = mask_dir
+        self.masks_dirs = masks_dirs
         
         self.init_ui()
         self.load_layers()
@@ -637,10 +945,16 @@ class GeoTIFFViewer(QWidget):
     def load_layers(self):
         """Carga ambas capas (mosaico y máscara)"""
         self.load_tiles(self.mosaic_dir, is_mask=False)
-        self.load_tiles(self.mask_dir, is_mask=True)
+        if self.masks_dirs:
+            colors = [[0, 255, 0, 128], [255, 140, 80, 128], [50, 205, 255, 128]]
+            for mask_dir, color_mask in zip(self.masks_dirs, colors):
+                self.load_tiles(mask_dir, is_mask=True, color_mask=color_mask)
+        else:
+            self.load_tiles(self.mask_dir, is_mask=True)
         self.view.fitInView(self.scene.itemsBoundingRect(), Qt.KeepAspectRatio)
+   
 
-    def load_tiles(self, tiles_dir, is_mask):
+    def load_tiles(self, tiles_dir, is_mask, color_mask = None):
         """Carga tiles individuales"""
         for tile_file in os.listdir(tiles_dir):
             if not tile_file.endswith(".tif"):
@@ -653,7 +967,7 @@ class GeoTIFFViewer(QWidget):
             x_pos, y_pos = map(int, match.groups())
             tile_path = os.path.join(tiles_dir, tile_file)
             
-            qimage = self.mask_to_qimage(tile_path) if is_mask else self.geotiff_to_qimage(tile_path)
+            qimage = self.mask_to_qimage(tile_path, color_mask) if is_mask else self.geotiff_to_qimage(tile_path)
             if not qimage.isNull():
                 item = QGraphicsPixmapItem(QPixmap.fromImage(qimage))
                 item.setPos(x_pos, y_pos)
@@ -676,7 +990,7 @@ class GeoTIFFViewer(QWidget):
         
         return QImage(rgb.data, width, height, 3 * width, QImage.Format_RGB888).copy()
 
-    def mask_to_qimage(self, path):
+    def mask_to_qimage(self, path, color_mask = None):
         """Convierte máscara a QImage transparente"""
         ds = gdal.Open(path)
         if not ds:
@@ -685,7 +999,17 @@ class GeoTIFFViewer(QWidget):
         mask = ds.GetRasterBand(1).ReadAsArray()
         height, width = mask.shape
         rgba = np.zeros((height, width, 4), dtype=np.uint8)
-        rgba[mask > 0] = [0, 255, 0, 128]  # Verde semitransparente
+        rgba[mask > 0] = color_mask if color_mask else [0, 255, 0, 128]
+        #,  # Verde semitransparente
+         #random.choices([
+           
+            #[255, 140, 80, 128],
+            #[50, 205, 255, 128]
+        #], 
+        #weights = [0.65, 0.2, 0.15],
+        #k=1
+        #)[0]
+       
         
         return QImage(rgba.data, width, height, 4 * width, QImage.Format_RGBA8888).copy()
 
@@ -720,6 +1044,68 @@ class GeoTIFFViewer(QWidget):
         factor = 1.1 ** (event.angleDelta().y() / 120)
         self.view.scale(factor, factor)
 
+class LegendItem(QWidget):
+    def __init__(self, color, label_text, parent = None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(2,2,2,2)
+        # Color square
+        color_label = QLabel()
+        color_label.setFixedSize(20,20)
+        pallete = color_label.palette()
+        pallete.setColor(QPalette.Window, QColor(color))
+        color_label.setAutoFillBackground(True)
+        color_label.setPalette(pallete)
+
+        # Text Label
+        text_label = QLabel(label_text)
+        text_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+        layout.addWidget(color_label)
+        layout.addWidget(text_label)
+        layout.addStretch()
+        
+
+class LegendWidget(QWidget):
+    def __init__(self):
+        super().__init__()
+
+        group_box = QGroupBox("Leyenda de Estado Nutricional")
+        group_box.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                font-size: 13px;
+                color: #333;
+                border: 1px solid #cccccc;
+                border-radius: 5px;
+                margin-top: 10px;
+            }
+
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 5px;
+                margin-left: 10px;
+            }
+        """)
+
+        group_layout = QVBoxLayout(group_box)
+        group_layout.setContentsMargins(10, 20, 40, 10)
+        group_layout.setSpacing(12)
+
+        leyend_data = [
+            ("#00FF32", "Saludable"),
+            ("#F49632", "Deficiencia Nutricional"),
+            ("#00B6FF", "Exceso Nutricional")
+        ]
+
+        for color, text in leyend_data:
+            group_layout.addWidget(LegendItem(color, text))
+
+        main_layout = QVBoxLayout(self)
+        main_layout.addWidget(group_box)
+        main_layout.addStretch()
+
 class MosaicView(QWidget):
     def __init__(self, main_window):
         super().__init__()
@@ -738,14 +1124,33 @@ class MosaicView(QWidget):
         self.setLayout(layout)
          # Crear instancia del visualizador
         self.viewer = GeoTIFFViewer(
-            mosaic_dir="./mosaico_10_images/tiles_pyramid/zoom_0",
-            mask_dir="./mosaico_10_images/tiles_mask_pyramid/zoom_0",
+            mosaic_dir="./mosaico_15_images/tiles_pyramid/zoom_3",
+            mask_dir="./mosaico_15_images/tiles_mask_pyramid/zoom_3",
+            masks_dirs = [
+                "./mosaico_15_images/tiles_mask_saludable_pyramid/zoom_3",
+                "./mosaico_15_images/tiles_mask_deficient_pyramid/zoom_3",
+                "./mosaico_15_images/tiles_mask_execeso_pyramid/zoom_3"
+                ],
             parent=self
         )
         
         layout.addWidget(self.viewer)
-        
- 
+
+class MapTreeScreen(QWidget):
+    def __init__(self, main_window):
+        super().__init__()
+        self.main_window = main_window
+        self.setup_ui()
+    
+    def setup_ui(self):
+        layout = QHBoxLayout(self)
+        #self.setLayout(layout)
+        self.mosaic_view = MosaicView(self.main_window)
+        self.legend_widget = LegendWidget()
+        layout.addWidget(self.mosaic_view, stretch=4)
+        layout.addSpacing(10)
+        layout.addWidget(self.legend_widget, stretch=1)
+        #label = QLabel()
 
 class MapTrees(QWidget):
     def __init__(self):
@@ -785,6 +1190,23 @@ class MapTrees(QWidget):
         layout.addWidget(self.web_view)
         self.setLayout(layout)
 
+class AnalysisData:
+    def __init__(self, base_dir = None, name = None, images_data = None):
+        self.images_data = images_data
+        self.base_dir = base_dir
+        self.name = name
+    
+    def add_image_data(self, id_img, metadata):
+        if self.images_data is None:
+            self.images_data = {}
+        self.images_data[id_img] = metadata
+
+    def set_base_dir(self, base_dir):
+        self.base_dir = base_dir
+
+    def set_name(self, name):
+        self.name = name
+    
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
@@ -825,7 +1247,7 @@ class MainWindow(QWidget):
         # Contenido
         self.page_home = Home(main_window=self)
         self.page_map_images = MapCaptures(main_window=self)
-        self.page_map_trees= MosaicView(main_window=self) #MapTrees()
+        self.page_map_trees= MapTreeScreen(main_window=self) #MapTrees()
 
         self.stack.addWidget(self.page_home)
         self.stack.addWidget(self.page_map_images)
@@ -833,11 +1255,16 @@ class MainWindow(QWidget):
         # Agregar widgets al layout principal
         main_layout.addWidget(self.navbar)
         main_layout.addWidget(self.stack)
-
+        self.analysis_data_store = AnalysisData()
         self.setLayout(main_layout)
 
     def switch_page(self, index):
         self.stack.setCurrentIndex(index)
+        
+    def update_analysis_data(self, analysis_data_store):
+        self.analysis_data_store = analysis_data_store
+        self.page_map_images.update_map_view(self.analysis_data_store.images_data)
+        self.navbar.setCurrentRow(1)  # Cambiar al segundo ítem del navbar
 
     def on_finish_configure(self):
         #self.page_map_images.update_map_view()

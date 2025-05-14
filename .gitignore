@@ -63,3 +63,9 @@ logs/
 ~*
 .DS_Store
 data/
+mosaico_10_images/
+mosaico_15_images/
+mosaico_2_images/
+mosaico_35_images/
+mosaico_3_images/
+segmentacion_results/
