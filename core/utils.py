@@ -4,8 +4,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import exiftool
 import numpy as np
-import json
-from glob import glob
 
 def detection_trees_human_ann(im_path, show = False):
     image_uav = cv2.imread(im_path)
@@ -96,6 +94,23 @@ def get_image_resolution(metadata):
     image_heigth = metadata.get("EXIF:ExifImageHeight") or metadata.get( "EXIF:ImageHeight")
 
     return image_width, image_heigth
+
+def get_relative_altitude(metadata):
+    relative_altitude_text = metadata["XMP:RelativeAltitude"]
+    signo, numero = (relative_altitude_text[0], relative_altitude_text[1:]) if relative_altitude_text[0] in '+-' else ("+", relative_altitude_text[0])
+    altitude_drone = float(numero) if signo == '+' else -float(numero)
+    return altitude_drone # meters
+
+def calcule_gsd_teorico(metadata):
+    altitude_drone = get_relative_altitude(metadata)
+    altitude_drone = altitude_drone # meters/pixel
+    image_width, image_heigth = get_image_resolution(metadata)
+    ancho_sensor = 17.4
+    alto_sensor = 13.0
+    focal_length = 12.29
+    GSD_horizontal = (altitude_drone * ancho_sensor) / (focal_length * image_width)
+    GSD_vertical = (altitude_drone * alto_sensor) / (focal_length * image_heigth)
+    return GSD_horizontal, GSD_vertical
 
 def calculate_gsd(metadata):
     relative_altitude_text = metadata["XMP:RelativeAltitude"]

@@ -186,8 +186,8 @@ if __name__ == "__main__":
     
     # Directorios deben tener la misma estructura de zoom levels
     viewer = GeoTIFFViewer(
-        mosaic_dir="./mosaico_10_images/tiles_pyramid/zoom_0",
-        mask_dir="./mosaico_10_images/tiles_mask_pyramid/zoom_0"
+        mosaic_dir="./mosaico_3_images/tiles_pyramid/zoom_0",
+        mask_dir="./mosaico_3_images/tiles_mask_pyramid/zoom_0"
     )
     viewer.show()
     app.exec()
