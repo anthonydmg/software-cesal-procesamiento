@@ -185,6 +185,7 @@ class MainWindowPrev(QWidget):
         self.page_home = Home(main_window=self)
         self.page_map_images = MapCaptures(main_window=self)
         self.page_map_trees= MapTreeScreen(main_window=self) #MapTrees()
+        self.page_map_trees= MapTreeScreen(main_window=self) #MapTrees()
 
         self.stack.addWidget(self.page_home)
         self.stack.addWidget(self.page_map_images)
@@ -192,6 +193,7 @@ class MainWindowPrev(QWidget):
         # Agregar widgets al layout principal
         main_layout.addWidget(self.navbar)
         main_layout.addWidget(self.stack)
+        self.analysis_data_store = AnalysisData()
         self.analysis_data_store = AnalysisData()
         self.setLayout(main_layout)
 
