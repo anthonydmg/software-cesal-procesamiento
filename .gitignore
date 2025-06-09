@@ -68,9 +68,6 @@ mosaico_15_images/
 mosaico_2_images/
 mosaico_35_images/
 mosaico_3_images/
-<<<<<<< HEAD
 segmentacion_results/
 mosaicos/
-=======
-segmentacion_results/
->>>>>>> 178297133ac60a7edf2c3b0250a147b5b32cc026
+*.csv
