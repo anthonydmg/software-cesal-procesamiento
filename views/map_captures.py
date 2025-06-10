@@ -11,6 +11,7 @@ from sahi.predict import get_prediction
 from datetime import datetime
 import gc
 import numpy as np
+from core.processing import generate_mosaic
 
 MAPBOX_TOKEN = os.getenv("MAPBOX_TOKEN")
 class ResultStorage:
@@ -110,7 +111,7 @@ class MemoryAwareYOLOModel:
     def _load_model(self):
         model = AutoDetectionModel.from_pretrained(
             model_type='yolo11',
-            model_path='C:/Users/antho/Local/cesal-proyecto/software-cesal-procesamiento/yolo11s-seg-finituned.pt',
+            model_path='C:/Users/Anthony/Local/cesal-proyecto/avocado-trees-identication/yolo11s-seg-finituned.pt',
             confidence_threshold=0.5,
             device=self.device,
         )
@@ -203,7 +204,7 @@ class ImageProcessor(QObject):
                             'processed_at': datetime.now().isoformat()
                         })
                         print("Termino de a agregar nuevo resultados")
-                        processed += 1
+                        processed += 0.5#1
                         progress = int((processed / total) * 100)
                         self.progress_updated.emit(
                             progress 
@@ -212,9 +213,11 @@ class ImageProcessor(QObject):
                         if processed % self.batch_size == 0:
                             batch_results = {}
                             QThread.msleep(100)
-
                 except Exception as e:
                     print(f"Error en {img_id}: {str(e)}")
+            
+            generate_mosaic(self.image_data, signal_progress=self.progress_updated)
+
             final_path = self.result_storage.merge_results()
             self.finished.emit()
 

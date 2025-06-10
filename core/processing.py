@@ -9,6 +9,16 @@ from pyproj import Proj, transform, CRS
 from pyproj import Transformer
 from scipy.spatial.transform import Rotation
 import time
+from enum import Enum
+from tqdm import tqdm
+from osgeo import gdal, osr
+class FusionMethod(Enum):
+    SIMPLE_AVERAGE = 1
+    SEAM_BLENDING = 2
+    WEIGHTED_DISTANCE = 3
+    EXPOSURE_COMPENSATED = 4
+    MULTIBAND_ADAPTIVE = 5
+    ROBUST_DRONE = 6
 
 class Camara_M3M:
     fx = fy = 3713.29  # Distancia focal en píxeles
@@ -91,9 +101,9 @@ def calculate_camera_pose(metadata):
     lat = metadata["latitude"]
     lon = metadata["longitude"]
     x_cam, y_cam, z_cam = camera_position(lat, lon, relative_altitude)
-    roll_degree_gimbal = metadata["roll_degree_gimbal"]
-    yaw_degree_gimbal = metadata["yaw_degree_gimbal"]
-    pitch_degree_gimbal = metadata["pitch_degree_gimbal"]
+    roll_degree_gimbal = metadata["roll_degree"]
+    yaw_degree_gimbal = metadata["yaw_degree"]
+    pitch_degree_gimbal = metadata["pitch_degree"]
     yaw_degree_gimbal, pitch_degree_gimbal, roll_degree_gimbal = angles_euler_gimbal_fix_orientation(yaw_degree_gimbal, pitch_degree_gimbal, roll_degree_gimbal)
     R_cam = rotation_matrix_cam(yaw_degree_gimbal, pitch_degree_gimbal, roll_degree_gimbal)
     camera_pose = np.hstack((R_cam, np.array([x_cam, y_cam, z_cam]).reshape(3, 1)))  # Matriz de pose [R | t]
@@ -277,3 +287,296 @@ def process_detect_keypoint_descriptors_in_dom(images_data, dom_size):
     return images_data
 
 
+def build_overlap_graph(all_terrain_points, min_overlap = 0.4):
+    """Construye un grafo de solapamiento entre imagenes"""
+    n = len(all_terrain_points)
+    graph = {i:[] for i in range(n)}
+    for i in range(n):
+        terrain_points_i = all_terrain_points[i]
+        poly_i = cv2.convexHull(terrain_points_i.astype(np.float32))
+        area_i = cv2.contourArea(poly_i)
+        for j in range(i+1, n):
+            terrain_points_j = all_terrain_points[j] 
+            poly_j = cv2.convexHull(terrain_points_j.astype(np.float32))
+            area_j = cv2.contourArea(poly_j)
+            intersection = cv2.intersectConvexConvex(poly_i, poly_j)[0]
+            overlap_ratio = intersection / min(area_i, area_j)
+            if overlap_ratio >= min_overlap:
+                graph[i].append((j, overlap_ratio))
+                graph[j].append((i, overlap_ratio))
+    
+    return graph
+
+def match_keypoints_with_flann(
+    desc1: np.ndarray, 
+    desc2: np.ndarray, 
+    detector_type: str = "ORB"
+) :
+    """
+    Empareja descriptores usando FLANN + Ratio Test de Lowe.
+    - Para ORB/AKAZE: FLANN con LSH (Locality-Sensitive Hashing).
+    - Para SIFT/SURF: FLANN con KD-Tree.
+    """
+    if detector_type in ["ORB", "AKAZE"]:
+        # Configuración FLANN para descriptores binarios (ORB/AKAZE)
+        flann_params = {
+            "algorithm": 6,  # LSH (Local Sensitivity Hashing)
+            "table_number": 6,
+            "key_size": 12,
+            "multi_probe_level": 1
+        }
+        flann = cv2.FlannBasedMatcher(flann_params, dict(checks=50))
+        matches = flann.knnMatch(desc1, desc2, k=2)
+        
+        # Ratio Test de Lowe (filtra matches ambiguos)
+        good_matches = []
+        for m, n in matches:
+            if m.distance < 0.6 * n.distance:  # Ratio típico para ORB/AKAZE
+                good_matches.append(m)
+        return good_matches
+    
+    elif detector_type in ["SIFT", "SURF"]:
+        # Configuración FLANN para descriptores no binarios (SIFT/SURF)
+        flann_params = dict(algorithm=1, trees=5)  # KD-Tree
+        flann = cv2.FlannBasedMatcher(flann_params, dict(checks=50))
+        matches = flann.knnMatch(desc1, desc2, k=2)
+        
+        # Ratio Test de Lowe
+        good_matches = []
+        for m, n in matches:
+            if m.distance < 0.7 * n.distance:  # Ratio típico para SIFT/SURF
+                good_matches.append(m)
+        return good_matches
+    
+    else:
+        raise ValueError(f"Detector no soportado: {detector_type}")
+    
+def find_pairwise_correction(i,j, all_images_data, type = "affine"):
+    desc_i = all_images_data[i]['desc_img_dom']
+    kp_img_dom_i = all_images_data[i]['kp_img_dom']
+    desc_j = all_images_data[j]['desc_img_dom']
+    kp_img_dom_j = all_images_data[j]['kp_img_dom']
+
+    matches = match_keypoints_with_flann(desc_i, desc_j)
+    print("matches:",len(matches))
+    if len(matches) < 10:
+        return None
+    
+    src_pts = np.float32([kp_img_dom_i[m.queryIdx].pt for m in matches])
+    dst_pts = np.float32([kp_img_dom_j[m.trainIdx].pt for m in matches])
+    
+     # Estimar transformación de corrección
+    #M, inliers = cv2.estimateAffinePartial2D(
+    #    src_pts, dst_pts, 
+    #    method=cv2.RANSAC, 
+    #    ransacReprojThreshold=5.0
+    #)
+    if type == "affine":
+        M, inliers = cv2.estimateAffinePartial2D(#cv2.estimateAffine2D(
+            src_pts, dst_pts, 
+            method=cv2.RANSAC, 
+            ransacReprojThreshold=5.0
+        )
+    else:
+        M, inliers = cv2.findHomography(
+            src_pts, dst_pts, 
+            method=cv2.RANSAC, 
+            ransacReprojThreshold=5.0
+        )
+
+    if M is not None and np.sum(inliers) > 10:
+        return {
+            'type': type, #'homography',
+            'matrix': M,
+            'num_matches': len(matches),
+            'inliers': np.sum(inliers),
+            'source_idx': i,
+            'target_idx': j
+        }
+    return None
+
+def correction_to_matrix(correction):
+    """Convierte una corrección a matriz de transformación homogénea"""
+    if correction['type'] == 'affine':
+        M = np.vstack([correction['matrix'], [0, 0, 1]])
+        return M
+    elif correction['type'] == 'homography':
+        return correction['matrix']
+    return np.eye(3)
+
+def propagate_pairwise_correction(all_images_data, type_align_matrix = "affine"):
+#all_images_data = df_images_filtered_slice.reset_index().to_dict(orient='index')
+    transforms = {i: np.eye(3) for i in range(len(all_images_data))}
+    corrected = set()
+    all_terrain_points_dom = [im_data['terrain_points_dom'] for im_data in all_images_data]
+    overlap_graph  = build_overlap_graph(all_terrain_points_dom, min_overlap=0.45)
+    first_img_idx = list(overlap_graph.keys())[0]
+    queue = [first_img_idx]
+    corrected.add(first_img_idx)
+    #type_align_matrix = "affine"# "affine"
+    while len(queue) >0:
+        img_idx = queue.pop(0)
+        neighbors = sorted([x[0] for x in overlap_graph[img_idx]], 
+                        key=lambda x: -overlap_graph[img_idx][[y[0] for y in overlap_graph[img_idx]].index(x)][1])
+        print("img_idx:", img_idx)
+        for neighbor_idx in neighbors[:3]:
+            if neighbor_idx not in corrected:
+                print("neighbor_idx:", neighbor_idx)
+                #print("neighbor_idx:", neighbor_idx)
+                #print("corrected:", corrected)
+                correction = find_pairwise_correction(neighbor_idx, img_idx, all_images_data, type = type_align_matrix)
+                if correction:
+                    M = correction_to_matrix(correction)
+                    transforms[neighbor_idx] = transforms[img_idx] @ M @ transforms[neighbor_idx]
+                    corrected.add(neighbor_idx)
+                    queue.append(neighbor_idx)
+                else:
+                    print(f"No encontrado match suficiente images idx :{img_idx}, neighbor_idx: {neighbor_idx}")
+    print("corrected:", len(corrected))
+    return transforms
+
+
+def calculate_weights(mask, image=None, method=FusionMethod.ROBUST_DRONE):
+    #print("method:", method)
+    """Calcula pesos según el método seleccionado"""
+    if method == FusionMethod.SIMPLE_AVERAGE:
+        return mask.astype(np.float32)
+    
+    elif method in [FusionMethod.WEIGHTED_DISTANCE, FusionMethod.ROBUST_DRONE]:
+        return cv2.distanceTransform(
+            mask.astype(np.uint8), 
+            cv2.DIST_L2, 
+            3
+        ) * mask
+    
+    elif method == FusionMethod.EXPOSURE_COMPENSATED:
+        # Implementación simplificada - en producción calcular ganancias reales
+        return cv2.distanceTransform(
+            mask.astype(np.uint8), 
+            cv2.DIST_L2, 
+            3
+        ) * mask
+    
+    else:
+        return mask.astype(np.float32)
+    
+    
+def save_as_geotiff(image, filename, origin_x, origin_y, resolution, ref_zone_lon, transparent_bg = True, alpha = 1.0):
+    """Guarda una imagen numpy como GeoTIFF georreferenciado"""
+    driver = gdal.GetDriverByName('GTiff')
+    rows, cols, bands = image.shape
+    
+    out_ds = driver.Create(
+        filename, 
+        cols, 
+        rows, 
+        bands + 1 if transparent_bg else bands, 
+        gdal.GDT_Byte)
+    # Establecer georreferenciación
+    out_ds.SetGeoTransform((
+        origin_x,    # Coordenada X del píxel superior izquierdo
+        resolution,   # Tamaño de píxel en X (resolución)
+        0,           # Rotación (0 si el norte está arriba)
+        origin_y,    # Coordenada Y del píxel superior izquierdo
+        0,           # Rotación (0 si el norte está arriba)
+        -resolution  # Tamaño de píxel en Y (negativo porque el origen es la esquina superior)
+    ))
+
+    # Establecer sistema de referencia espacial (WGS84 UTM por ejemplo)
+        # Sistema de coordenadas (ej: UTM zona 18S para Perú)
+    srs = osr.SpatialReference()
+    zone = int((ref_zone_lon + 180) // 6 + 1)  # Corregido para usar coordenada x (origin[0])
+    epsg = 32700 + zone #if origin_y < 0 else 32600 + zone  # 326XX para norte, 327XX para sur
+    print("epsg:", epsg)
+    srs = osr.SpatialReference()
+    srs.ImportFromEPSG(epsg)  # Cambiar al EPSG adecuado para tu zona UTM
+    out_ds.SetProjection(srs.ExportToWkt())
+
+    for b in range(bands):
+        out_band = out_ds.GetRasterBand(b+1)
+        out_band.WriteArray(image[:, :, 2-b])
+        out_band.FlushCache()
+        
+    if transparent_bg:
+        #Crear y escribir banda Alpha (0 donde la imagen es cero)
+        alpha_band = np.ones((image.shape[0], image.shape[1]), dtype=np.uint8) * 255
+        # Verificar si todos los canales son cero (píxel transparente)
+        zero_mask = np.all(image == 0, axis=2)
+        alpha_band[zero_mask] = 0
+        if alpha < 1.0:
+            alpha_band = (alpha_band * alpha).astype(np.uint8)
+
+        out_ds.GetRasterBand(4).WriteArray(alpha_band)
+        # Configurar la banda 4 como canal alpha
+        out_ds.GetRasterBand(4).SetColorInterpretation(gdal.GCI_AlphaBand)
+   
+    out_ds.FlushCache()
+    out_ds = None  # Cerrar el archivo
+
+
+def generate_mosaic(all_images_data, type_align_matrix = "affine", signal_progress = None):
+    all_images_data_list = all_images_data.values()
+    all_images_data_list = process_calculate_camera_pose(all_images_data_list)
+    signal_progress.emit(55)
+    all_images_data_list = process_terrain_points(all_images_data_list)
+    signal_progress.emit(60)
+    dom_bounds, dom_resolution = estimate_dom_parameters(all_images_data_list, margin_extension = 0.1)
+    signal_progress.emit(65)
+    all_images_data_list = process_project_corners_to_dom(all_images_data_list, dom_bounds, dom_resolution)
+    signal_progress.emit(70)
+    all_images_data_list = process_detect_keypoint_descriptors_in_dom(all_images_data_list, dom_size)
+    signal_progress.emit(75)
+    transforms = propagate_pairwise_correction(all_images_data_list, type_align_matrix)
+    signal_progress.emit(85)
+    width_m = dom_bounds[1] - dom_bounds[0]
+    height_m = dom_bounds[3] - dom_bounds[2]
+    width_px = int(width_m / dom_resolution)
+    height_px = int(height_m / dom_resolution)
+    dom_size = (height_px, width_px)
+
+    
+    blended = np.zeros((height_px, width_px, 3), dtype=np.float32)
+    total_weights = np.zeros((height_px, width_px), dtype=np.float32)
+    detector_type = "SIFT"
+    ref_zone_lon = all_images_data[0]['longitude']
+
+    for index, row in enumerate(tqdm(all_images_data, desc = "Build Mosaic")):
+        image = cv2.imread(row['relative_im_path'])
+        image_distortion = distortion_correction(image)
+        #image_distortion = cv2.putText(image_distortion, f"{index}", (image_distortion.shape[1]//2, image_distortion.shape[0]//2), cv2.FONT_HERSHEY_COMPLEX, 8, (0,0,255), thickness= 5)
+        H_rtk = row['H_rtk']
+        terrain_points_dom = row['terrain_points_dom']
+        imagen_proyectada, mask = direct_project_image_to_dom(image_distortion, H_rtk, dom_size, terrain_points_dom)
+
+        projected_corrected = cv2.warpPerspective(imagen_proyectada, transforms[index], (int(dom_size[1]), int(dom_size[0])))
+        mask = cv2.warpPerspective(mask, transforms[index], (int(dom_size[1]), int(dom_size[0])))
+        weights = calculate_weights(mask, None, FusionMethod.ROBUST_DRONE)
+        max_weight = np.max(weights)
+        if max_weight > 0:
+            weights = weights / max_weight
+        #weights = cv2.GaussianBlur(weights, (9, 9), 0)
+        update_mask = weights > total_weights
+        blended[update_mask] = projected_corrected[update_mask]
+        total_weights = np.maximum(total_weights, weights)
+    
+        progress = int((85 +  15 * index/ len(all_images_data)) * 100)
+        signal_progress.emit(progress)
+    final_dom = blended.astype(np.uint8).copy()
+
+    plt.figure(figsize=(10,10))
+    plt.imshow(cv2.cvtColor(final_dom, cv2.COLOR_BGR2RGB))
+    plt.show()
+    save_as_geotiff(
+            final_dom, f"campo2_mosaico_graph_queue_refine_{type_align_matrix}_{detector_type}_{len(all_images_data)}_images.tif", 
+            dom_bounds[0], dom_bounds[3],  # Esquina superior izquierda (X,Y)
+            dom_resolution,
+            ref_zone_lon
+        )
+    signal_progress.emit(100)
+if __name__ == "__main__":
+    print()
+    #generate_mosaic(all_images_data, type_align_matrix = "affine")
+#type_align_matrix = "affine"
+#transforms = propagate_pairwise_correction(df_images_filtered_slice.reset_index().to_dict(orient='index'), type_align_matrix)
+
+#overlap_graph  = build_overlap_graph(all_terrain_points_dom, min_overlap=0.45)

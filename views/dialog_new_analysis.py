@@ -1,7 +1,7 @@
 from PySide6.QtWidgets import QApplication, QDialog, QStackedWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QFileDialog, QFrame, QListWidget, QProgressBar, QTableWidget, QScrollArea, QTableWidgetItem
 from PySide6.QtCore import Qt, Signal
 import os
-from core.utils import get_gps_coordinates, get_image_resolution, get_metadata, calcule_gsd_teorico
+from core.utils import get_gps_coordinates, get_image_resolution, get_metadata, calcule_gsd_teorico, get_relative_altitude
 import pandas as pd
 
 class InitialConfigureScreen(QFrame):
@@ -227,6 +227,8 @@ class ImageSelectionScreen(QFrame):
     def go_back_to_initial(self):
         self.dialog_parent.go_back_to_initial()
 
+
+
     def get_exif_data(self, image_path):
         metadata = get_metadata(image_path)
         latitude, longitude = get_gps_coordinates(metadata)
@@ -235,6 +237,7 @@ class ImageSelectionScreen(QFrame):
         yaw_degree = metadata.get("XMP:GimbalYawDegree")
         pitch_degree = metadata.get("XMP:GimbalPitchDegree")
         roll_degree = metadata.get("XMP:GimbalRollDegree")
+        relative_altitude = get_relative_altitude(metadata)
         GSD_horizontal, GSD_vertical = calcule_gsd_teorico(metadata)
 
         if not isinstance(yaw_degree, float):
@@ -255,7 +258,8 @@ class ImageSelectionScreen(QFrame):
             "image_width": image_width,
             "image_height": image_height,
             "gsd_horizontal": GSD_horizontal,
-            "gsd_vertical": GSD_vertical
+            "gsd_vertical": GSD_vertical,
+            "relative_altitude": relative_altitude
         }
        
         return metadata_data
