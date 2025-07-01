@@ -12,6 +12,7 @@ import time
 from enum import Enum
 from tqdm import tqdm
 from osgeo import gdal, osr
+
 class FusionMethod(Enum):
     SIMPLE_AVERAGE = 1
     SEAM_BLENDING = 2
@@ -516,25 +517,32 @@ def save_as_geotiff(image, filename, origin_x, origin_y, resolution, ref_zone_lo
 
 def generate_mosaic(all_images_data, type_align_matrix = "affine", signal_progress = None):
     all_images_data_list = all_images_data.values()
+    print("Comienza process_calculate_camera_pose")
     all_images_data_list = process_calculate_camera_pose(all_images_data_list)
     signal_progress.emit(55)
+    print("Comienza process_terrain_points")
     all_images_data_list = process_terrain_points(all_images_data_list)
     signal_progress.emit(60)
+    print("Comienza estimate_dom_parameters")
     dom_bounds, dom_resolution = estimate_dom_parameters(all_images_data_list, margin_extension = 0.1)
     signal_progress.emit(65)
+    print("Comienza process_project_corners_to_dom")
     all_images_data_list = process_project_corners_to_dom(all_images_data_list, dom_bounds, dom_resolution)
     signal_progress.emit(70)
+    print("Comienza process_detect_keypoint_descriptors_in_dom")
     all_images_data_list = process_detect_keypoint_descriptors_in_dom(all_images_data_list, dom_size)
     signal_progress.emit(75)
+    print("Comienza propagate_pairwise_correction")
     transforms = propagate_pairwise_correction(all_images_data_list, type_align_matrix)
     signal_progress.emit(85)
+    print("Comienza transformations")
+    #print("Comienza propagate_pairwise_correction")
     width_m = dom_bounds[1] - dom_bounds[0]
     height_m = dom_bounds[3] - dom_bounds[2]
     width_px = int(width_m / dom_resolution)
     height_px = int(height_m / dom_resolution)
     dom_size = (height_px, width_px)
 
-    
     blended = np.zeros((height_px, width_px, 3), dtype=np.float32)
     total_weights = np.zeros((height_px, width_px), dtype=np.float32)
     detector_type = "SIFT"

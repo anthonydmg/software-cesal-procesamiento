@@ -1,7 +1,7 @@
 from PySide6.QtWidgets import QApplication, QDialog, QStackedWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QFileDialog, QFrame, QListWidget, QProgressBar, QTableWidget, QScrollArea, QTableWidgetItem
 from PySide6.QtCore import Qt, Signal
 import os
-from core.utils import get_gps_coordinates, get_image_resolution, get_metadata, calcule_gsd_teorico, get_relative_altitude
+from core.utils import get_gps_coordinates, get_image_resolution, get_metadata, calcule_gsd_teorico, get_relative_altitude, get_gimbal_euler_angles
 import pandas as pd
 
 class InitialConfigureScreen(QFrame):
@@ -234,16 +234,12 @@ class ImageSelectionScreen(QFrame):
         latitude, longitude = get_gps_coordinates(metadata)
         print(f"Latitud: {latitude}, Longitud: {longitude}")
         image_width, image_height = get_image_resolution(metadata)
-        yaw_degree = metadata.get("XMP:GimbalYawDegree")
-        pitch_degree = metadata.get("XMP:GimbalPitchDegree")
-        roll_degree = metadata.get("XMP:GimbalRollDegree")
+
+
+        yaw_degree, pitch_degree, roll_degree = get_gimbal_euler_angles(metadata)
         relative_altitude = get_relative_altitude(metadata)
         GSD_horizontal, GSD_vertical = calcule_gsd_teorico(metadata)
 
-        if not isinstance(yaw_degree, float):
-            signo, yaw_degree = (yaw_degree[0], yaw_degree[1:]) if yaw_degree[0] in '+-' else ("+", yaw_degree[0])
-            yaw_degree =  float(yaw_degree) if signo == '+' else -float(yaw_degree)
-        
         datetime = metadata.get("EXIF:DateTimeOriginal")
         basename = os.path.basename(image_path)
         
@@ -417,7 +413,7 @@ class NewAnalysisDialog(QDialog):
         self.stacked_widget.setCurrentIndex(0)
 
     def go_to_image_data_table(self):
-        print("self.new_analysis_data_store.images_data:", self.new_analysis_data_store.images_data)
+        #print("self.new_analysis_data_store.images_data:", self.new_analysis_data_store.images_data)
         self.image_data_screen.update_data_table(self.new_analysis_data_store.images_data)
         """Método para ir al paso de tabla de datos de imagen"""
         self.stacked_widget.setCurrentIndex(2)

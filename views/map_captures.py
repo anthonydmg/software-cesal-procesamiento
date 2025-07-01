@@ -215,7 +215,7 @@ class ImageProcessor(QObject):
                             QThread.msleep(100)
                 except Exception as e:
                     print(f"Error en {img_id}: {str(e)}")
-            
+            print("Comienza Generacion de Mosaico")
             generate_mosaic(self.image_data, signal_progress=self.progress_updated)
 
             final_path = self.result_storage.merge_results()

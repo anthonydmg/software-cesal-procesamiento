@@ -95,6 +95,18 @@ def get_image_resolution(metadata):
 
     return image_width, image_heigth
 
+def get_gimbal_euler_angles(metadata):
+    yaw_degree = metadata.get("XMP:GimbalYawDegree")
+    pitch_degree = metadata.get("XMP:GimbalPitchDegree")
+    roll_degree = metadata.get("XMP:GimbalRollDegree")
+    euler_angles = []
+    for degree in [yaw_degree, pitch_degree, roll_degree]:
+        if not isinstance(degree, float):
+            signo, degree = (degree[0], degree[1:]) if degree[0] in '+-' else ("+", degree[0])
+            degree =  float(degree) if signo == '+' else -float(degree)
+        euler_angles.append(degree)
+    return euler_angles
+
 def get_relative_altitude(metadata):
     relative_altitude_text = metadata["XMP:RelativeAltitude"]
     signo, numero = (relative_altitude_text[0], relative_altitude_text[1:]) if relative_altitude_text[0] in '+-' else ("+", relative_altitude_text[0])
