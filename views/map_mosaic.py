@@ -30,6 +30,47 @@ class GeoTIFFViewer(QWidget):
         self.view = QGraphicsView(self.scene)
         self.view.setDragMode(QGraphicsView.ScrollHandDrag)
         self.view.setRenderHint(QPainter.Antialiasing)
+        self.view.setStyleSheet("""
+        /* ScrollBar vertical */
+        QScrollBar:vertical {
+            background: #f0f0f0;
+            width: 12px;
+            margin: 0px;
+        }
+        QScrollBar::handle:vertical {
+            background: #888;
+            min-height: 20px;
+            border-radius: 6px;
+        }
+        QScrollBar::handle:vertical:hover {
+            background: #555;
+        }
+        QScrollBar::add-line:vertical,
+        QScrollBar::sub-line:vertical {
+            height: 0px;
+            background: none;
+        }
+
+        /* ScrollBar horizontal */
+        QScrollBar:horizontal {
+            background: #f0f0f0;
+            height: 12px;
+            margin: 0px;
+        }
+        QScrollBar::handle:horizontal {
+            background: #888;
+            min-width: 20px;
+            border-radius: 6px;
+        }
+        QScrollBar::handle:horizontal:hover {
+            background: #555;
+        }
+        QScrollBar::add-line:horizontal,
+        QScrollBar::sub-line:horizontal {
+            width: 0px;
+            background: none;
+        }
+        """)
         
         # Botones de la barra superiores
         tool_bar_layout = QHBoxLayout()
