@@ -26,7 +26,21 @@ class NavItem(QWidget):
         layout.addWidget(icon_label)
         layout.addWidget(text_label)
         self.setLayout(layout)
+        # Estilo base transparente
+        self.setStyleSheet("""
+            QWidget {
+                background-color: transparent;
+            }
+        """)
 
+    def leaveEvent(self, event):
+        # Restaura el fondo al salir el mouse
+        self.setStyleSheet("""
+            QWidget {
+                background-color: transparent;
+            }
+        """)
+        super().leaveEvent(event)
 
 class MainContent(QWidget):
     def __init__(self):
@@ -40,6 +54,8 @@ class MainContent(QWidget):
 
         # Navbar lateral
         self.navbar = QListWidget()
+
+
         #self.navbar.setIconSize(QSize(64, 64))  # Tamaño grande del icono
         self.navbar.setFlow(QListWidget.TopToBottom)  # Icono arriba y texto abajo
 
@@ -94,12 +110,13 @@ class MainContent(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("NutriHass")
+        self.setWindowTitle("AgroHass")
         #self.setGeometry(100,100,800,600)
         self.resize(1200, 768)
         #self.setGeometry(100, 100, 800, 600)
         self.create_menu_bar()
         main_widget = QWidget()
+        main_widget.setStyleSheet("background-color: white;")  # fondo blanco
         main_layout = QHBoxLayout(main_widget)  # Asignamos el layout al widget
         main_layout.setContentsMargins(0,0,0,0)
         main_content = MainContent()  # Asegúrate de que MainContent sea un QWidget
@@ -120,6 +137,9 @@ class MainWindow(QMainWindow):
         }
         QMenuBar::item:selected {
             background-color: #d0d0d0;
+        }
+        QMenu {
+                font-weight: 500;
         }
     """)
         # Menú Archivo

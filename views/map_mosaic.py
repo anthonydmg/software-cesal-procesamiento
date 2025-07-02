@@ -1,5 +1,6 @@
 from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QGroupBox, QLabel, QGraphicsScene, QGraphicsView, QGraphicsPixmapItem, QToolButton
 from PySide6.QtGui import QPalette, QColor, QPainter, QPixmap, QImage, QIcon
+from PySide6.QtGui import QFont
 from PySide6.QtCore import Qt, QRectF
 import re
 import os
@@ -194,10 +195,11 @@ class LegendItem(QWidget):
         # Color square
         color_label = QLabel()
         color_label.setFixedSize(20,20)
-        pallete = color_label.palette()
-        pallete.setColor(QPalette.Window, QColor(color))
-        color_label.setAutoFillBackground(True)
-        color_label.setPalette(pallete)
+        color_label.setStyleSheet(f"background-color: {color};")
+        #pallete = color_label.palette()
+        #pallete.setColor(QPalette.Window, QColor(color))
+        #color_label.setAutoFillBackground(True)
+        #color_label.setPalette(pallete)
 
         # Text Label
         text_label = QLabel(label_text)
@@ -288,7 +290,7 @@ class MapTreeScreen(QWidget):
         self.setup_ui()
     
     def setup_ui(self):
-        outer_layout = QHBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
         outer_layout.setAlignment(Qt.AlignCenter)  # Centra el contenedor completo
 
         inner_widget = QWidget()
@@ -302,8 +304,13 @@ class MapTreeScreen(QWidget):
         #self.legend_widget.setMaximumWidth(200)
         inner_layout.addWidget(self.mosaic_view, stretch=4)
         inner_layout.addWidget(self.legend_widget, stretch=1)
-
-        outer_layout.addWidget(inner_widget)
+        title_section_widget = QLabel("Análisis de salud del cultivo")
+        font = QFont()
+        font.setPointSize(16)  # Ajusta el tamaño según tu diseño en Figma
+        font.setBold(True)
+        title_section_widget.setFont(font)
+        outer_layout.addWidget(title_section_widget)
+        outer_layout.addWidget(inner_widget)    
         #layout.addWidget(self.mosaic_view, stretch=4)
         #layout.addSpacing(10)
         #layout.addWidget(self.legend_widget, stretch=1)
