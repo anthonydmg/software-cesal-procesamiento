@@ -51,7 +51,8 @@ class MainContent(QWidget):
         #self.showMaximized()
         # Principal
         main_layout = QHBoxLayout(self)
-
+        main_layout.setContentsMargins(0, 0, 0, 0)  # <- elimina márgenes internos
+        main_layout.setSpacing(0)  # <- elimina espacio entre widgets intern
         # Navbar lateral
         self.navbar = QListWidget()
 
@@ -76,7 +77,7 @@ class MainContent(QWidget):
         self.navbar.addItem(item3)
         item3.setSizeHint(QSize(100, 100))
         self.navbar.setItemWidget(item3, NavItem("./assets/map-marker.svg", "Mapa Arboles"))
-        self.navbar.setFixedWidth(100)
+        self.navbar.setFixedWidth(105)
         self.navbar.currentRowChanged.connect(self.switch_page)
 
         # Contenedor central

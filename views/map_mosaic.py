@@ -16,8 +16,8 @@ class GeoTIFFViewer(QWidget):
         super().__init__(parent)
         self.mosaic_dir = mosaic_dir
         self.masks_dirs = masks_dirs
-        self.setAutoFillBackground(True)
-        self.setStyleSheet("background-color: white;")
+        #self.setAutoFillBackground(True)
+        #self.setStyleSheet("background-color: white;")
         self.init_ui()
         self.load_layers()
     
@@ -37,6 +37,8 @@ class GeoTIFFViewer(QWidget):
         self.zoom_in_btn.setIcon(QIcon("./assets/zoom_in.svg"))
         self.zoom_out_btn = QToolButton()
         self.zoom_out_btn.setIcon(QIcon("./assets/zoom_out.svg"))
+        self.zoom_in_btn.setStyleSheet("padding: 8px;")
+        self.zoom_out_btn.setStyleSheet("padding: 8px;")
         # Iconos simples
         #self.zoom_in_btn.setText("+")
         #self.zoom_out_btn.setText("-")
@@ -51,7 +53,6 @@ class GeoTIFFViewer(QWidget):
         toolbar_container = QWidget()
         toolbar_container.setLayout(tool_bar_layout)
         toolbar_container.setStyleSheet("""
-            background-color: #f5f5f5;
             border-bottom: 1px solid #cccccc;
         """)
 
@@ -217,11 +218,11 @@ class LegendWidget(QWidget):
         group_box.setStyleSheet("""
             QGroupBox {
                 font-weight: bold;
-                font-size: 13px;
+                font-size: 16px;
                 color: #333;
                 border: 1px solid #cccccc;
                 border-radius: 5px;
-                margin-top: 10px;
+                margin-top: 35px;
             }
 
             QGroupBox::title {
@@ -233,7 +234,7 @@ class LegendWidget(QWidget):
         """)
 
         group_layout = QVBoxLayout(group_box)
-        group_layout.setContentsMargins(10, 20, 40, 10)
+        group_layout.setContentsMargins(10, 10, 40, 10)
         group_layout.setSpacing(12)
 
         leyend_data = [
@@ -297,18 +298,32 @@ class MapTreeScreen(QWidget):
         inner_layout = QHBoxLayout(inner_widget)
         inner_layout.setContentsMargins(0, 0, 0, 0)
         inner_layout.setSpacing(0)  # Espacio fijo entre mapa y leyenda
-
+        
+        
         #self.setLayout(layout)
         self.mosaic_view = MosaicView(self.main_window)
         self.legend_widget = LegendWidget()
+
+        legend_container = QWidget()
+        legend_layout = QVBoxLayout()
+        legend_layout.setContentsMargins(0, 0, 0, 0)  # sin márgenes laterales
+        legend_layout.setSpacing(0)
+
+        # Espaciador arriba (por ejemplo, 20px)
+        legend_layout.addSpacing(30)
+
+        legend_layout.addWidget(self.legend_widget)
+        legend_container.setLayout(legend_layout)
+
         #self.legend_widget.setMaximumWidth(200)
         inner_layout.addWidget(self.mosaic_view, stretch=4)
-        inner_layout.addWidget(self.legend_widget, stretch=1)
+        inner_layout.addWidget(legend_container, stretch=1)
         title_section_widget = QLabel("Análisis de salud del cultivo")
         font = QFont()
-        font.setPointSize(16)  # Ajusta el tamaño según tu diseño en Figma
+        font.setPointSize(18)  # Ajusta el tamaño según tu diseño en Figma
         font.setBold(True)
         title_section_widget.setFont(font)
+        title_section_widget.setStyleSheet("padding-left: 15px;")
         outer_layout.addWidget(title_section_widget)
         outer_layout.addWidget(inner_widget)    
         #layout.addWidget(self.mosaic_view, stretch=4)
