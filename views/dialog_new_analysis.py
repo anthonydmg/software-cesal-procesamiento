@@ -86,8 +86,8 @@ class InitialConfigureScreen(QFrame):
         folder_filled = bool(self.folder_input.text().strip())
 
         # Estilo rojo si está vacío, normal si está lleno
-        self.name_input.setStyleSheet("border: 2px solid red;" if not name_filled else "")
-        self.folder_input.setStyleSheet("border: 2px solid red;" if not folder_filled else "")
+        self.name_input.setStyleSheet("border: 1px solid red;" if not name_filled else "")
+        self.folder_input.setStyleSheet("border: 1px solid red;" if not folder_filled else "")
 
         # Habilitar o deshabilitar el botón de siguiente
         self.next_button.setEnabled(name_filled and folder_filled)
@@ -111,8 +111,57 @@ class ImageSelectionScreen(QFrame):
         self.image_list = QListWidget()
         self.image_list.setSelectionMode(QListWidget.ExtendedSelection)
 
-        self.image_list.setStyleSheet(""" QListWidget::item:hover { background-color: rgba(100, 149, 237, 0.5); } 
-                                          QListWidget::item:selected { background-color: rgba(70, 130, 180, 0.8); color: white; }""")
+        self.image_list.setStyleSheet("""
+    QListWidget::item:hover {
+        background-color: rgba(100, 149, 237, 0.5);
+    }
+    QListWidget::item:selected {
+        background-color: rgba(70, 130, 180, 0.8);
+        color: white;
+    }
+
+    QScrollBar:vertical {
+        background: #f0f0f0;
+        width: 12px;
+        margin: 0px 0px 0px 0px;
+    }
+    QScrollBar::handle:vertical {
+        background: #999999;
+        min-height: 20px;
+        border-radius: 5px;
+    }
+    QScrollBar::handle:vertical:hover {
+        background: #666666;
+    }
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+        background: none;
+        height: 0px;
+    }
+    QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+        background: none;
+    }
+
+    QScrollBar:horizontal {
+        background: #f0f0f0;
+        height: 12px;
+        margin: 0px 0px 0px 0px;
+    }
+    QScrollBar::handle:horizontal {
+        background: #999999;
+        min-width: 20px;
+        border-radius: 5px;
+    }
+    QScrollBar::handle:horizontal:hover {
+        background: #666666;
+    }
+    QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+        background: none;
+        width: 0px;
+    }
+    QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+        background: none;
+    }
+""")
         
         button_layout = QHBoxLayout()
         self.add_images_button = QPushButton("Añadir Imágenes...")
@@ -283,6 +332,50 @@ class ImageDataTableScreen(QFrame):
         scroll_area = QScrollArea()
         scroll_area.setWidget(self.table)
         scroll_area.setWidgetResizable(True)  # Hacer que la tabla se ajuste al tamaño del área
+
+        scroll_area.setStyleSheet("""
+            QScrollBar:vertical {
+                background: #f0f0f0; /* fondo de la barra */
+                width: 12px;
+                margin: 0px 0px 0px 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: #999999; /* color del handle (barra que se mueve) */
+                min-height: 20px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #666666; /* más oscuro cuando el mouse pasa encima */
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                background: none;
+                height: 0px;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: none;
+            }
+
+            QScrollBar:horizontal {
+                background: #f0f0f0;
+                height: 12px;
+                margin: 0px 0px 0px 0px;
+            }
+            QScrollBar::handle:horizontal {
+                background: #999999;
+                min-width: 20px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: #666666;
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                background: none;
+                width: 0px;
+            }
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+                background: none;
+            }
+        """)
         layout.addWidget(scroll_area)
 
         # Botones en la parte inferior

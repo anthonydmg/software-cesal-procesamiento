@@ -139,9 +139,6 @@ class MainWindow(QMainWindow):
         QMenuBar::item:selected {
             background-color: #d0d0d0;
         }
-        QMenu {
-                font-weight: 500;
-        }
     """)
         # Menú Archivo
         file_menu = menu_bar.addMenu("Analisis")
@@ -159,7 +156,7 @@ class MainWindow(QMainWindow):
         help_menu = menu_bar.addMenu("Ayuda")
         
         # Acciones del menú Ayuda
-        about_action = help_menu.addAction("Acerca de...")
+        about_action = help_menu.addAction("Manual de Usuario")
         about_action.triggered.connect(self.show_about)
     
     def show_about(self):

@@ -58,7 +58,7 @@ class Home(QWidget):
         layout = QVBoxLayout()
         layout.setAlignment(Qt.AlignCenter)
 
-        title = QLabel("NutriHass")
+        title = QLabel("AgroHass")
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet("font-size:24px; font-weight: bold; padding: 0px 0px 10px 0px;")
 

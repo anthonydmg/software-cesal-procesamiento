@@ -204,7 +204,7 @@ class ImageProcessor(QObject):
                             'processed_at': datetime.now().isoformat()
                         })
                         print("Termino de a agregar nuevo resultados")
-                        processed += 0.5#1
+                        processed += 1
                         progress = int((processed / total) * 100)
                         self.progress_updated.emit(
                             progress 
@@ -216,7 +216,7 @@ class ImageProcessor(QObject):
                 except Exception as e:
                     print(f"Error en {img_id}: {str(e)}")
             print("Comienza Generacion de Mosaico")
-            generate_mosaic(self.image_data, signal_progress=self.progress_updated)
+            #generate_mosaic(self.image_data, signal_progress=self.progress_updated)
 
             final_path = self.result_storage.merge_results()
             self.finished.emit()
@@ -269,7 +269,7 @@ class MapCaptures(QWidget):
         self.progress_bar.setMinimum(0)
         self.progress_bar.setMaximum(100)
         self.progress_bar.setValue(0)
-        self.progress_bar.setFixedHeight(20)
+        self.progress_bar.setFixedHeight(25)
 
         start_button = QPushButton("Iniciar")
         start_button.setStyleSheet("""
@@ -278,7 +278,7 @@ class MapCaptures(QWidget):
                 color: white;
                 border: 2px solid #1b4d3e;
                 border-radius: 5px;
-                padding: 10px 20px;
+                padding: 0px 40px;
                 font-size: 16px;
             }
             QPushButton:hover {
@@ -293,6 +293,7 @@ class MapCaptures(QWidget):
 
         progress_layout.addWidget(self.progress_bar)
         progress_layout.addWidget(start_button)
+        progress_layout.setContentsMargins(0, 0, 0, 10)  # left, top, right, bottom
 
         processing_layout.addWidget(processing_label)
         processing_layout.addLayout(progress_layout)
@@ -311,7 +312,7 @@ class MapCaptures(QWidget):
             location=[-13.881719661927868, -73.03486801134967], 
             zoom_start=19,
             max_zoom=22, 
-            tiles=f"https://api.mapbox.com/styles/v1/mapbox/satellite-v9/tiles/{{z}}/{{x}}/{{y}}?access_token={MAPBOX_TOKEN}",
+            tiles=f"https://api.mapbox.com/styles/v1/mapbox/satellite-v9/tiles/{{z}}/{{x}}/{{y}}?access_token=pk.eyJ1IjoiYW50aG9ueW1nMSIsImEiOiJjbTNuajBzamwxZXMxMmtweDV3anZkcHRxIn0.1ZlgQwJcn4msckpzTNSSJg",
             attr="Mapbox"
         )
         self.update_data(images_data)
