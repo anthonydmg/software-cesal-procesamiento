@@ -1,5 +1,5 @@
 from PySide6.QtWidgets import QApplication, QDialog, QStackedWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QFileDialog, QFrame, QListWidget, QProgressBar, QTableWidget, QScrollArea, QTableWidgetItem
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QObject, Slot, QThread
 import os
 from core.utils import get_gps_coordinates, get_image_resolution, get_metadata, calcule_gsd_teorico, get_relative_altitude, get_gimbal_euler_angles
 import pandas as pd
@@ -58,7 +58,7 @@ class InitialConfigureScreen(QFrame):
         folder_path = self.folder_input.text().strip()
         # Construir la ruta final
         final_path = os.path.join(folder_path, name)
-
+        
         try:
             os.makedirs(final_path, exist_ok=True)  # Crea la carpeta si no existe
             print(f"Carpeta creada: {final_path}")  # Debug (puedes eliminar esto después)
@@ -97,6 +97,60 @@ class InitialConfigureScreen(QFrame):
         self.validate_inputs()  # Actualiza los estilos visuales
         if self.next_button.isEnabled():  # Solo avanza si está habilitado
             self.go_to_image_selection_screen()
+
+class MetadataWorker(QObject):
+    progress_changed = Signal(int)
+    metadata_loaded = Signal(int, dict)
+    finished = Signal()
+
+    def __init__(self, image_paths):
+        super().__init__()
+        self.image_paths = image_paths
+    
+    @Slot()
+    def run(self):
+        total_images = len(self.image_paths)
+        for i, path in enumerate(self.image_paths):
+            metadata = self.get_exif_data(path)
+            if metadata:
+                self.metadata_loaded.emit(i, dict(img_relative_path = path, **metadata))
+
+                progress = int((i + 1) / total_images * 100)
+                self.progress_changed.emit(progress)
+        
+        self.finished.emit()
+
+    def get_exif_data(self, image_path):
+        metadata = get_metadata(image_path)
+        latitude, longitude = get_gps_coordinates(metadata)
+        print(f"Latitud: {latitude}, Longitud: {longitude}")
+        image_width, image_height = get_image_resolution(metadata)
+
+
+        yaw_degree, pitch_degree, roll_degree = get_gimbal_euler_angles(metadata)
+        relative_altitude = get_relative_altitude(metadata)
+        GSD_horizontal, GSD_vertical = calcule_gsd_teorico(metadata)
+
+        datetime = metadata.get("EXIF:DateTimeOriginal")
+        basename = os.path.basename(image_path)
+        
+        metadata_data = {
+            "name": basename,
+            "latitude": latitude,
+            "longitude" : longitude,
+            "yaw_degree": yaw_degree,
+            "pitch_degree": pitch_degree,
+            "roll_degree": roll_degree,
+            "DateTimeOriginal": datetime,
+            "image_width": image_width,
+            "image_height": image_height,
+            "gsd_horizontal": GSD_horizontal,
+            "gsd_vertical": GSD_vertical,
+            "relative_altitude": relative_altitude
+        }
+       
+        return metadata_data
+
 
 class ImageSelectionScreen(QFrame):
     def __init__(self, parent = None, dialog_parent=None):
@@ -244,46 +298,35 @@ class ImageSelectionScreen(QFrame):
         total_images = len(image_paths)
         print("\ntotal_images:", total_images)
         print()
-        metadata_list = []
 
-        for i, path in enumerate(image_paths):
-            # Actualizar progreso
-            progress = int((i + 1) / total_images * 100)
-            self.progress_bar.setValue(progress)
-            QApplication.processEvents()
+        self.qthread = QThread()
+        self.worker = MetadataWorker(image_paths)
+        self.worker.moveToThread(self.qthread)
+        self.qthread.started.connect(self.worker.run)
+        self.worker.metadata_loaded.connect(self.on_metadata_loaded)
+        self.worker.progress_changed.connect(self.progress_bar.setValue)
+        self.worker.finished.connect(self.on_metadata_finished)
+        self.worker.finished.connect(self.qthread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.worker.finished.connect(self.qthread.deleteLater)
+        self.qthread.start()
 
-            # Leer metadatos
-            metadata = self.get_exif_data(path)
-            
-            if metadata:
-                self.dialog_parent.new_analysis_data_store.add_image_data(i, dict(img_relative_path = path, **metadata))
-                metadata_list.append([
-                    metadata["name"],
-                    metadata["image_width"],
-                    metadata["image_height"],
-                    metadata["latitude"],
-                    metadata["longitude"],
-                    metadata["yaw_degree"],
-                    metadata["pitch_degree"],
-                    metadata["roll_degree"],
-                    metadata["DateTimeOriginal"],
-                ])
+        return None
         
-        #self.dialog_parent.image_data_screen.load_metadata(metadata_list)
-
-        self.dialog_parent.go_to_image_data_table()
+    def on_metadata_loaded(self, index, metadata):
+        self.dialog_parent.new_analysis_data_store.add_image_data(index, metadata)
     
+    def on_metadata_finished(self):
+        self.dialog_parent.go_to_image_data_table()
+
     def go_back_to_initial(self):
         self.dialog_parent.go_back_to_initial()
-
-
 
     def get_exif_data(self, image_path):
         metadata = get_metadata(image_path)
         latitude, longitude = get_gps_coordinates(metadata)
         print(f"Latitud: {latitude}, Longitud: {longitude}")
         image_width, image_height = get_image_resolution(metadata)
-
 
         yaw_degree, pitch_degree, roll_degree = get_gimbal_euler_angles(metadata)
         relative_altitude = get_relative_altitude(metadata)
@@ -436,10 +479,22 @@ class ImageDataTableScreen(QFrame):
 
     def finish_configure(self):
         self.finished_configure.emit()
+        ## Aqui guardar datos en json
+        ## self.new_analysis_data_store.images_data
+        base_dir = self.dialog_parent.new_analysis_data_store.base_dir
+        images_data = self.dialog_parent.new_analysis_data_store.images_data
+        config = {"image_metatada": images_data}
+        self.save_configure_analysis(base_dir, config)
+
         if isinstance(self.dialog_parent, QDialog):
             self.dialog_parent.accept()  
         else:
             self.dialog_parent.close()
+    
+    def save_configure_analysis(self, base_dir, data):
+        import json
+        with open(f"{base_dir}/config.json", "w") as f:
+            json.dump(data, f)    
 
 class AnalysisData:
     def __init__(self, base_dir = None, name = None, images_data = None):
