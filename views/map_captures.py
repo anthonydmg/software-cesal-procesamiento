@@ -1,6 +1,8 @@
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar, QPushButton
+from PySide6.QtWidgets import QWidget, QApplication, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar, QPushButton
 from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtCore import QMutex, QThread, QObject, Signal, Slot
+from PySide6.QtCore import QMutex, QThread, QObject, Signal, Slot, QSize
+from PySide6.QtGui import QIcon, QPainter, QColor, QBrush
+from PySide6.QtCore import Qt
 import folium
 import os
 import json
@@ -14,6 +16,7 @@ import numpy as np
 from core.processing import generate_mosaic
 
 MAPBOX_TOKEN = os.getenv("MAPBOX_TOKEN")
+
 class ResultStorage:
     def __init__(self, output_dir: str = "results"):
         self.mutex = QMutex()
@@ -227,6 +230,53 @@ class ImageProcessor(QObject):
 
     def stop(self):
         self.is_running = False
+class RoundedProgressBar(QProgressBar):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setTextVisible(False)
+        self.setMinimumHeight(14)
+        self.radius = 7  # mitad de la altura
+        self.bg_color = QColor("#E5E8EB")
+        self.chunk_color = QColor("#76e900")
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        # Dibujar fondo
+        painter.setBrush(QBrush(self.bg_color))
+        painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(self.rect(), self.radius, self.radius)
+
+        # Dibujar progreso
+        progress_width = int(self.width() * (self.value() / self.maximum()))
+        if progress_width > 0:
+            rect = self.rect().adjusted(0, 0, -(self.width() - progress_width), 0)
+            painter.setBrush(QBrush(self.chunk_color))
+            painter.drawRoundedRect(rect, self.radius, self.radius)
+
+        painter.end()
+
+class ItemDetails(QWidget):
+    def __init__(self, item_name, value,  bold_value = False):
+        super().__init__()
+        layout = QVBoxLayout()
+
+        name_label = QLabel(item_name)
+        name_label.setStyleSheet("color: #626263; font-size: 14px;")
+
+        if bold_value:
+            name_content_label = QLabel(value)
+            name_content_label.setStyleSheet("color: #05893A; font-size: 14px;")
+        else:
+            name_content_label = QLabel(value)
+            name_content_label.setStyleSheet("color: #000000; font-size: 14px;")
+        
+        layout.addWidget(name_label)
+        layout.addWidget(name_label)
+
+        self.setLayout(layout)
+
 
 class MapCaptures(QWidget):
     def __init__(self, main_window):
@@ -242,67 +292,117 @@ class MapCaptures(QWidget):
 
         # Crear QWebEngineView
         self.web_view = QWebEngineView()
+
+        details_web_layout = QHBoxLayout()
+
+        # Titulo Detalles
+        details_content_layout = QVBoxLayout()
+        
+        details_title = QLabel("Detalles de Analisis")
+        details_title.setStyleSheet("color: #05893A; font-size: 14px; background-color: #B9FFD3;")
+        details_content_layout.addWidget(details_title)
+
+        name_label = QLabel("Nombre del Análisis")
+        name_label.setStyleSheet("color: #626263; font-size: 14px;")
+
+        name_content_label = QLabel("Análisis Ejemplo 1")
+        name_content_label.setStyleSheet("color: #000000; font-size: 14px;")
+
         self.images_data = {}
 
         self.update_map_view(images_data = self.images_data)
 
         # Sección inferior con barra de progreso y botón
-        processing_layout = QVBoxLayout()
+
+        processing_info_layout = QVBoxLayout()
+        processing_button_layout = QHBoxLayout()
+        
+
         progress_layout = QHBoxLayout()
 
+        processing_info_layout.setSpacing(0)
+        processing_info_layout.setAlignment(Qt.AlignTop)
         processing_label = QLabel("Procesamiento")
-        processing_label.setStyleSheet("font-size: 18px; font-weight: bold; padding: 0px;")
+        processing_label.setStyleSheet("font-size: 18px; font-weight: bold;")
+        processing_info_layout.addWidget(processing_label)
+        status_procesing = QLabel("Estado del procesameinto de imagenes")
+        status_procesing.setStyleSheet("font-size: 14px; padding-top: 5px; padding-bottom: 5px; color: #5F5F60;")
+        processing_info_layout.addWidget(status_procesing)
 
-        self.progress_bar = QProgressBar()
+        self.progress_bar = RoundedProgressBar()
         self.progress_bar.setStyleSheet("""
             QProgressBar {
-                border: 2px solid grey;
-                border-radius: 5px;
+                background-color: #E5E8EB;
+                border-radius: 4px; /* Igual que el padre */
                 text-align: center;
             }
             QProgressBar::chunk {
                 background-color: #76e900;
-                width: 20px;
+                border-radius: 4px; /* Igual que el padre */
+                width: 10px;
+                margin: 0px;
             }
         """)
         self.progress_bar.setMinimumWidth(400)
         self.progress_bar.setMinimum(0)
         self.progress_bar.setMaximum(100)
         self.progress_bar.setValue(0)
-        self.progress_bar.setFixedHeight(25)
+        self.progress_bar.setFixedHeight(14)
+        self.progress_bar.setTextVisible(False)
 
-        start_button = QPushButton("Iniciar")
-        start_button.setStyleSheet("""
+        self.start_button = QPushButton("  Iniciar Procesamiento")
+        self.start_button.setIcon(QIcon("./assets/play.svg"))
+        self.start_button.setIconSize(QSize(14, 14))
+        self.start_button.setStyleSheet("""
             QPushButton {
-                background-color: #2d6a4f;
+                background-color: #07C553;
                 color: white;
-                border: 2px solid #1b4d3e;
-                border-radius: 5px;
-                padding: 0px 40px;
-                font-size: 16px;
+                border-radius: 10px;
+                padding-left: 20px;
+                padding-right: 20px;
+                padding-top: 6px;
+                padding-bottom: 6px;
+                font-size: 13px;
+                font-weight: 600;
             }
             QPushButton:hover {
-                background-color: #3a8d72;
-                border-color: #2c5e47;
+                background-color: #05A848 ;
+                border-color: #05A848 ;
             }
             QPushButton:pressed {
                 background-color: #1f4f39;
             }
         """)
-        start_button.clicked.connect(self.start_progress)
-
+        self.start_button.setMaximumWidth(240)
+        self.start_button.clicked.connect(self.start_progress)
+        percentage_label = QLabel("45% Completado")
+        percentage_label.setStyleSheet("font-size: 14px;  padding-top: 0px; color: #5F5F60;")
+        percentage_label.setAlignment(Qt.AlignRight)
+        
         progress_layout.addWidget(self.progress_bar)
-        progress_layout.addWidget(start_button)
+        progress_layout.addWidget(self.start_button)
+        
         progress_layout.setContentsMargins(0, 0, 0, 10)  # left, top, right, bottom
+        
+        processing_info_layout.setAlignment(Qt.AlignLeft)
+        #self.start_button.setAlignment(Qt.AlignRight)
+        processing_button_layout.addLayout(processing_info_layout)
+        processing_button_layout.addWidget(self.start_button)
+        #processing_info_layout.addLayout(progress_layout)
+        processing_main_layout = QVBoxLayout()
+        processing_main_layout.setContentsMargins(10, 10, 10, 10)
+        processing_main_layout.addLayout(processing_button_layout)
+        processing_main_layout.addWidget(self.progress_bar)
+        processing_main_layout.addWidget(percentage_label)
 
-        processing_layout.addWidget(processing_label)
-        processing_layout.addLayout(progress_layout)
 
         layout.addWidget(self.web_view)
-        layout.addLayout(processing_layout)
+        layout.addLayout(processing_main_layout)
+        #layout.addWidget(self.progress_bar)
+        #layout.addWidget(percentage_label)
 
         layout.setStretchFactor(self.web_view, 9)
-        layout.setStretchFactor(processing_layout, 1)
+        layout.setStretchFactor(processing_info_layout, 1)
 
         self.setLayout(layout)
 
@@ -316,6 +416,60 @@ class MapCaptures(QWidget):
             attr="Mapbox"
         )
         self.update_data(images_data)
+
+    def show_cancel(self):
+        self.start_button.clicked.disconnect()
+        self.start_button.setText("  Cancelar Procesamiento")
+        self.start_button.setIcon(QIcon("./assets/cancel.svg"))
+        self.start_button.setStyleSheet("""
+            QPushButton {
+                background-color: #E53935;
+                color: white;
+                border-radius: 10px;
+                padding-left: 20px;
+                padding-right: 20px;
+                padding-top: 6px;
+                padding-bottom: 6px;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #C62828 ;
+                border-color: #05A848 ;
+            }
+        """)
+        self.start_button.clicked.connect(self.cancel_processing)
+        
+    def cancel_processing(self):
+        print("Cancelar")
+        self.restaurar_boton()
+
+    def restaurar_boton(self):
+        """Vuelve a poner el botón en su estado inicial."""
+        self.start_button.clicked.disconnect()
+        self.start_button.setText("  Iniciar Procesamiento")
+        self.start_button.setIcon(QIcon("./assets/play.svg"))
+        self.start_button.setStyleSheet("""
+            QPushButton {
+                background-color: #07C553;
+                color: white;
+                border-radius: 10px;
+                padding-left: 20px;
+                padding-right: 20px;
+                padding-top: 6px;
+                padding-bottom: 6px;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #05A848 ;
+                border-color: #05A848 ;
+            }
+            QPushButton:pressed {
+                background-color: #1f4f39;
+            }
+        """)
+        self.start_button.clicked.connect(self.start_progress)
 
     def update_data(self, images_data):
         """Actualiza los puntos en el mapa a partir del CSV"""
@@ -371,14 +525,15 @@ class MapCaptures(QWidget):
         self.update_map_view(f"{path_base}/{folder_name}/image_metada.csv")
 
     def start_progress(self):
-        
+        self.show_cancel()
+        import time
         """Simula el progreso y actualiza el mapa al finalizar"""
         self.images_data = self.main_window.analysis_data_store.images_data
-        self.setup_processing_thread()
-        #for i in range(101):
-        #    self.progress_bar.setValue(i)
-        #    QApplication.processEvents()
-        #    time.sleep(0.05)
+        #self.setup_processing_thread()
+        for i in range(101):
+            self.progress_bar.setValue(i)
+            QApplication.processEvents()
+            time.sleep(0.05)
             
         #self.main_window.switch_page(2)
         # Simular actualización de datos y regenerar el mapa
