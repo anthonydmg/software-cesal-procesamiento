@@ -1,6 +1,7 @@
 from PySide6.QtWidgets import QApplication, QMainWindow, QMenuBar, QWidget, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QVBoxLayout, QHBoxLayout, QListWidget, QStackedWidget, QLabel, QListWidgetItem, QPushButton, QFrame, QProgressBar, QSizePolicy, QDialog, QLineEdit, QFileDialog, QTableWidget, QTableWidgetItem, QScrollArea, QGroupBox,  QFrame, QSizePolicy
 from PySide6.QtGui import QIcon, QImage, QPixmap, QPainter, QPalette, QColor
 from PySide6.QtCore import Qt, QSize, Signal, QRectF, QMutex, Signal, Slot, Qt, QThread, QObject
+
 import os
 from dotenv import load_dotenv
 import sys
@@ -79,7 +80,6 @@ class MainContent(QWidget):
         self.navbar.setItemWidget(item3, NavItem("./assets/map-marker.svg", "Mapa Arboles"))
         self.navbar.setFixedWidth(105)
         self.navbar.currentRowChanged.connect(self.switch_page)
-
         # Contenedor central
         self.stack = QStackedWidget()
         # Contenido
