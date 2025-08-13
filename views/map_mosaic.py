@@ -70,6 +70,7 @@ class GeoTIFFViewer(QWidget):
             width: 0px;
             background: none;
         }
+        background: #f0f0f0;
         """)
         
         # Botones de la barra superiores
@@ -324,6 +325,60 @@ class MosaicView(QWidget):
         
         layout.addWidget(self.viewer)
 
+class TitleResults(QWidget):
+    def __init__(self, name_analysis):
+        super().__init__()
+
+        # Contenedor con color de fondo
+        container = QWidget()
+        container.setStyleSheet("background-color: #B9FFD3;")
+
+        # Layout del contenedor
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(0, 0, 0, 0)  # Sin márgenes
+        container_layout.setSpacing(0)  # Sin espacios
+
+        # Título principal
+        name_analysis_title = QLabel(name_analysis)
+        name_analysis_title.setStyleSheet("""
+            color: #05893A;
+            padding: 5px 10px;
+            font-size: 14px;
+            font-weight: bold;
+        """)
+        name_analysis_title.setAlignment(Qt.AlignLeft)
+
+        # Subtítulo
+        subtitle = QLabel("Resultados del Análisis")
+        subtitle.setStyleSheet("""
+            color: #626263;
+            padding: 5px 10px;
+            font-size: 11px;
+            font-weight: 600;
+        """)
+
+        # Añadir widgets al contenedor
+        container_layout.addWidget(name_analysis_title)
+        container_layout.addWidget(subtitle)
+
+        # Layout principal
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        main_layout.addWidget(container)
+
+
+class DiagramWidget():
+    def __init__(self, title, image_path):
+        layout = QVBoxLayout()
+        title_widget = QLabel(title)
+        title_widget.setStyleSheet("""
+            color: #000000;
+            font-size: 13px;
+            font-weight: 600;
+        """)
+        image_label = QLabel()
+        image_label.setPixmap(QPixmap(image_path).scaled(200,200, Qt.Keep))
 
 class MapTreeScreen(QWidget):
     def __init__(self, main_window):
@@ -343,6 +398,7 @@ class MapTreeScreen(QWidget):
         
         #self.setLayout(layout)
         self.mosaic_view = MosaicView(self.main_window)
+    
         self.legend_widget = LegendWidget()
 
         legend_container = QWidget()
@@ -352,7 +408,9 @@ class MapTreeScreen(QWidget):
 
         # Espaciador arriba (por ejemplo, 20px)
         legend_layout.addSpacing(30)
-
+        
+        title_results = TitleResults("Análisis Ejemplo 1")
+        legend_layout.addWidget(title_results)
         legend_layout.addWidget(self.legend_widget)
         legend_container.setLayout(legend_layout)
 

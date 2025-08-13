@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QWidget, QApplication, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar, QPushButton
+from PySide6.QtWidgets import QWidget, QApplication, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar, QPushButton, QSizePolicy
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtCore import QMutex, QThread, QObject, Signal, Slot, QSize
 from PySide6.QtGui import QIcon, QPainter, QColor, QBrush
@@ -263,17 +263,17 @@ class ItemDetails(QWidget):
         layout = QVBoxLayout()
 
         name_label = QLabel(item_name)
-        name_label.setStyleSheet("color: #626263; font-size: 14px;")
+        name_label.setStyleSheet("padding-left: 5px; color: #626263; font-size: 14px;")
 
         if bold_value:
             name_content_label = QLabel(value)
-            name_content_label.setStyleSheet("color: #05893A; font-size: 14px;")
+            name_content_label.setStyleSheet("padding-left: 5px; color: #05893A; font-size: 14px;  font-weight: bold;")
         else:
             name_content_label = QLabel(value)
-            name_content_label.setStyleSheet("color: #000000; font-size: 14px;")
+            name_content_label.setStyleSheet("padding-left: 5px; color: #000000; font-size: 14px;")
         
         layout.addWidget(name_label)
-        layout.addWidget(name_label)
+        layout.addWidget(name_content_label)
 
         self.setLayout(layout)
 
@@ -292,22 +292,44 @@ class MapCaptures(QWidget):
 
         # Crear QWebEngineView
         self.web_view = QWebEngineView()
-
-        details_web_layout = QHBoxLayout()
-
-        # Titulo Detalles
-        details_content_layout = QVBoxLayout()
+        self.web_view.setStyleSheet("margin: 0; padding: 0; border: none;")
+        self.web_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        #self.web_view.setStyleSheet("background-color: #000000;")
         
+        details_web_layout = QHBoxLayout()
+        details_web_layout.setSpacing(0)
+        details_web_layout.addWidget(self.web_view)
+
+        
+        # Titulo Detalles
+        details_content_widget = QWidget()
+        details_content_layout = QVBoxLayout()
+        details_content_layout.setContentsMargins(0, 0, 0, 0)  # Quita márgenes internos
+        details_content_widget.setLayout(details_content_layout)
+        details_content_widget.setStyleSheet("background-color: #ffffff; padding: 0px;")
+        details_content_widget.setMaximumWidth(240)
+        #details_content_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)  # Evita que crezca más de lo necesario
+
         details_title = QLabel("Detalles de Analisis")
-        details_title.setStyleSheet("color: #05893A; font-size: 14px; background-color: #B9FFD3;")
+        details_title.setStyleSheet("color: #05893A; padding-right: 10px; padding-left: 10px; padding-top: 5px; padding-bottom: 5px; font-size: 12px; font-weight: bold; background-color: #B9FFD3;")
+        details_title.setAlignment(Qt.AlignCenter)
         details_content_layout.addWidget(details_title)
 
-        name_label = QLabel("Nombre del Análisis")
-        name_label.setStyleSheet("color: #626263; font-size: 14px;")
+        items_detalis = [("Nombre del Análisis", "Análisis Ejemplo 1", True), 
+                         ("Cantidad de Imágenes", "331", False),
+                         ("Modelo de Cámara", "M3M", False),
+                         ("GSD promedio", "0.5 cm/px", False),
+                         ("Altura Promedio", "14.92 m", False)]
+        
+        for item in items_detalis:
+            items_det = ItemDetails(*item)
+            details_content_layout.addWidget(items_det)
 
-        name_content_label = QLabel("Análisis Ejemplo 1")
-        name_content_label.setStyleSheet("color: #000000; font-size: 14px;")
-
+        details_content_layout.setAlignment(Qt.AlignTop)
+        details_web_layout.setAlignment(Qt.AlignTop)
+        details_web_layout.addWidget(details_content_widget)
+        details_web_layout.setStretch(0, 10)  # El mapa ocupa mucho más
+        details_web_layout.setStretch(1, 2)   # Detalles ocupan menos
         self.images_data = {}
 
         self.update_map_view(images_data = self.images_data)
@@ -375,6 +397,7 @@ class MapCaptures(QWidget):
         """)
         self.start_button.setMaximumWidth(240)
         self.start_button.clicked.connect(self.start_progress)
+
         percentage_label = QLabel("45% Completado")
         percentage_label.setStyleSheet("font-size: 14px;  padding-top: 0px; color: #5F5F60;")
         percentage_label.setAlignment(Qt.AlignRight)
@@ -394,15 +417,17 @@ class MapCaptures(QWidget):
         processing_main_layout.addLayout(processing_button_layout)
         processing_main_layout.addWidget(self.progress_bar)
         processing_main_layout.addWidget(percentage_label)
-
-
-        layout.addWidget(self.web_view)
-        layout.addLayout(processing_main_layout)
+        
+        processing_main_widget = QWidget()
+        processing_main_widget.setLayout(processing_main_layout)
+        processing_main_widget.setMaximumHeight(120)  # Parte inferior fija
+        layout.addLayout(details_web_layout)
+        layout.addWidget(processing_main_widget)
         #layout.addWidget(self.progress_bar)
         #layout.addWidget(percentage_label)
 
-        layout.setStretchFactor(self.web_view, 9)
-        layout.setStretchFactor(processing_info_layout, 1)
+        layout.setStretchFactor(details_web_layout, 10)
+        layout.setStretchFactor(processing_main_layout, 0)
 
         self.setLayout(layout)
 
@@ -513,6 +538,17 @@ class MapCaptures(QWidget):
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/leaflet.js"></script>
             <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/leaflet.css"/>
+            <style>
+                html, body {{
+                    margin: 0;
+                    padding: 0;
+                    height: 100%;
+                }}
+                #map {{
+                    height: 100%;
+                    width: 100%;
+                }}  
+            </style>
         </head>
         <body>
             {html_map}
