@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QGroupBox, QLabel, QGraphicsScene, QGraphicsView, QGraphicsPixmapItem, QToolButton
+from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QGroupBox, QLabel, QGraphicsScene, QGraphicsView, QGraphicsPixmapItem, QToolButton, QFrame
 from PySide6.QtGui import QPalette, QColor, QPainter, QPixmap, QImage, QIcon
 from PySide6.QtGui import QFont
 from PySide6.QtCore import Qt, QRectF
@@ -368,17 +368,61 @@ class TitleResults(QWidget):
         main_layout.addWidget(container)
 
 
-class DiagramWidget():
+class DiagramWidget(QWidget):
     def __init__(self, title, image_path):
+        super().__init__()
         layout = QVBoxLayout()
+
+        # Contenedor con borde
+        content_frame = QFrame()
+        content_frame.setFrameShape(QFrame.StyledPanel)  # forma del marco
+        content_frame.setFrameShadow(QFrame.Plain)       # sombra simple
+      
+        # Layout interno del QFrame
+        content_layout = QVBoxLayout(content_frame)
+        content_layout.setAlignment(Qt.AlignCenter)
+        content_layout.setContentsMargins(10, 10, 10, 10)  # margen interno
+
         title_widget = QLabel(title)
+        
         title_widget.setStyleSheet("""
             color: #000000;
             font-size: 13px;
             font-weight: 600;
         """)
+
         image_label = QLabel()
-        image_label.setPixmap(QPixmap(image_path).scaled(200,200, Qt.Keep))
+        image_label.setPixmap(QPixmap(image_path).scaled(250,250, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        image_label.setAlignment(Qt.AlignCenter)
+        content_layout.setAlignment(Qt.AlignCenter)
+
+        content_layout.addWidget(title_widget)
+        content_layout.addWidget(image_label)
+   
+        layout.addWidget(content_frame)
+
+        self.setLayout(layout)
+
+class RightPanelResults(QWidget):
+    def __init__(self):
+        super().__init__()
+
+        container = QWidget()
+        container_layout = QVBoxLayout()
+        container_layout.setContentsMargins(0, 0, 0, 0)  # sin márgenes laterales
+        container_layout.setSpacing(0)
+        legend_widget = LegendWidget()
+        # Espaciador arriba (por ejemplo, 20px)
+        container_layout.addSpacing(30)
+
+        title_results = TitleResults("Análisis Ejemplo 1")
+        container_layout.addWidget(title_results)
+
+        ## Diagrama
+        diagram_widget = DiagramWidget("Distribucion de  arboles con deficiencias nutricionales", "./assets/diagram.png")
+        layout.addWidget(diagram_widget)
+        layout.addWidget(widget)
+        container.setLayout(legend_layout)
 
 class MapTreeScreen(QWidget):
     def __init__(self, main_window):
@@ -409,8 +453,13 @@ class MapTreeScreen(QWidget):
         # Espaciador arriba (por ejemplo, 20px)
         legend_layout.addSpacing(30)
         
+
         title_results = TitleResults("Análisis Ejemplo 1")
         legend_layout.addWidget(title_results)
+
+        ## Diagrama
+        diagram_widget = DiagramWidget("Distribucion de  arboles con deficiencias nutricionales", "./assets/diagram.png")
+        legend_layout.addWidget(diagram_widget)
         legend_layout.addWidget(self.legend_widget)
         legend_container.setLayout(legend_layout)
 
