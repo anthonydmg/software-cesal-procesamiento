@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QGroupBox, QLabel, QGraphicsScene, QGraphicsView, QGraphicsPixmapItem, QToolButton, QFrame
+from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QGroupBox, QLabel, QGraphicsScene, QGraphicsView, QGraphicsPixmapItem, QToolButton, QFrame, QPushButton
 from PySide6.QtGui import QPalette, QColor, QPainter, QPixmap, QImage, QIcon
 from PySide6.QtGui import QFont
 from PySide6.QtCore import Qt, QRectF
@@ -74,31 +74,24 @@ class GeoTIFFViewer(QWidget):
         """)
         
         # Botones de la barra superiores
-        tool_bar_layout = QHBoxLayout()
-        self.zoom_in_btn = QToolButton()
+        #tool_bar_layout = QHBoxLayout()
+        self.zoom_in_btn = QToolButton(self)
+        self.zoom_in_btn.setFixedSize(60, 60)
         self.zoom_in_btn.setIcon(QIcon("./assets/zoom_in.svg"))
         self.zoom_out_btn = QToolButton()
         self.zoom_out_btn.setIcon(QIcon("./assets/zoom_out.svg"))
         self.zoom_in_btn.setStyleSheet("padding: 8px;")
         self.zoom_out_btn.setStyleSheet("padding: 8px;")
+        
         # Iconos simples
         #self.zoom_in_btn.setText("+")
         #self.zoom_out_btn.setText("-")
 
         self.zoom_in_btn.setToolTip("Zoom In")
         self.zoom_out_btn.setToolTip("Zoom Out")
+       
 
-        tool_bar_layout.addWidget(self.zoom_in_btn)
-        tool_bar_layout.addWidget(self.zoom_out_btn)
-        tool_bar_layout.addStretch()
-
-        toolbar_container = QWidget()
-        toolbar_container.setLayout(tool_bar_layout)
-        toolbar_container.setStyleSheet("""
-            border-bottom: 1px solid #cccccc;
-        """)
-
-        self.layout.addWidget(toolbar_container)
+        #self.layout.addWidget(toolbar_container)
         # Añadir vista al layout
         self.layout.addWidget(self.view)
 
@@ -222,6 +215,7 @@ class GeoTIFFViewer(QWidget):
         self.view.scale(factor, factor)
     
     def resizeEvent(self, event):
+        self.zoom_in_btn.move(20, self.height() - 80)  # 20 px desde la izquierda
         super().resizeEvent(event)
         self.view.fitInView(self.scene.itemsBoundingRect(), Qt.KeepAspectRatio)
     
@@ -246,8 +240,13 @@ class LegendItem(QWidget):
 
         # Text Label
         text_label = QLabel(label_text)
+        #text_label.setWordWrap(True) 
         text_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-
+        text_label.setStyleSheet("""
+            color: #000000;
+            font-size: 11px;
+            font-weight: 500;
+        """)
         layout.addWidget(color_label)
         layout.addWidget(text_label)
         layout.addStretch()
@@ -256,7 +255,7 @@ class LegendWidget(QWidget):
     def __init__(self):
         super().__init__()
 
-        group_box = QGroupBox("Leyenda de Estado Nutricional")
+        group_box = QGroupBox("Leyenda")
         group_box.setStyleSheet("""
             QGroupBox {
                 font-weight: bold;
@@ -343,7 +342,7 @@ class TitleResults(QWidget):
         name_analysis_title.setStyleSheet("""
             color: #05893A;
             padding: 5px 10px;
-            font-size: 14px;
+            font-size: 15px;
             font-weight: bold;
         """)
         name_analysis_title.setAlignment(Qt.AlignLeft)
@@ -353,7 +352,7 @@ class TitleResults(QWidget):
         subtitle.setStyleSheet("""
             color: #626263;
             padding: 5px 10px;
-            font-size: 11px;
+            font-size: 12px;
             font-weight: 600;
         """)
 
@@ -381,10 +380,11 @@ class DiagramWidget(QWidget):
         # Layout interno del QFrame
         content_layout = QVBoxLayout(content_frame)
         content_layout.setAlignment(Qt.AlignCenter)
-        content_layout.setContentsMargins(10, 10, 10, 10)  # margen interno
+        content_layout.setContentsMargins(2, 2, 2, 2)  # margen interno
 
         title_widget = QLabel(title)
-        
+        title_widget.setAlignment(Qt.AlignCenter)
+        title_widget.setWordWrap(True)  # Habilita salto de línea
         title_widget.setStyleSheet("""
             color: #000000;
             font-size: 13px;
@@ -394,6 +394,7 @@ class DiagramWidget(QWidget):
         image_label = QLabel()
         image_label.setPixmap(QPixmap(image_path).scaled(250,250, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         image_label.setAlignment(Qt.AlignCenter)
+    
         content_layout.setAlignment(Qt.AlignCenter)
 
         content_layout.addWidget(title_widget)
@@ -404,25 +405,58 @@ class DiagramWidget(QWidget):
         self.setLayout(layout)
 
 class RightPanelResults(QWidget):
-    def __init__(self):
+    def __init__(self, name_analysis, diagram_path):
         super().__init__()
 
         container = QWidget()
         container_layout = QVBoxLayout()
         container_layout.setContentsMargins(0, 0, 0, 0)  # sin márgenes laterales
         container_layout.setSpacing(0)
-        legend_widget = LegendWidget()
+        
         # Espaciador arriba (por ejemplo, 20px)
         container_layout.addSpacing(30)
 
-        title_results = TitleResults("Análisis Ejemplo 1")
+        title_results = TitleResults(name_analysis)
         container_layout.addWidget(title_results)
 
         ## Diagrama
-        diagram_widget = DiagramWidget("Distribucion de  arboles con deficiencias nutricionales", "./assets/diagram.png")
-        layout.addWidget(diagram_widget)
-        layout.addWidget(widget)
-        container.setLayout(legend_layout)
+        diagram_widget = DiagramWidget("Distribucion de  arboles con deficiencias nutricionales", diagram_path)
+        container_layout.addWidget(diagram_widget)
+        legend_widget = LegendWidget()
+        container_layout.addWidget(legend_widget)
+        report_button = QPushButton("  Generar Reporte")
+        report_button.setIcon(QIcon("./assets/file.svg"))
+        
+        report_button.setStyleSheet("""
+            QPushButton {
+                color: white;
+                background-color: #07C553;
+                font-weight: bold;
+                font-size: 16px;
+            }
+        """)
+
+        export_button = QPushButton("  Exportar Resultados")
+        export_button.setIcon(QIcon("./assets/file.svg"))
+        
+        export_button.setStyleSheet("""
+            QPushButton {
+                color: white;
+                background-color: #07C553;
+                font-weight: bold;
+                font-size: 16px;
+            }
+        """)
+
+
+        container_layout.addWidget(report_button)
+        container_layout.addWidget(export_button)
+
+        container.setLayout(container_layout)
+
+        layout = QVBoxLayout()
+        layout.addWidget(container)
+        self.setLayout(layout)
 
 class MapTreeScreen(QWidget):
     def __init__(self, main_window):
@@ -443,36 +477,21 @@ class MapTreeScreen(QWidget):
         #self.setLayout(layout)
         self.mosaic_view = MosaicView(self.main_window)
     
-        self.legend_widget = LegendWidget()
-
-        legend_container = QWidget()
-        legend_layout = QVBoxLayout()
-        legend_layout.setContentsMargins(0, 0, 0, 0)  # sin márgenes laterales
-        legend_layout.setSpacing(0)
-
-        # Espaciador arriba (por ejemplo, 20px)
-        legend_layout.addSpacing(30)
         
+        right_panel = RightPanelResults(name_analysis = "Análisis Ejemplo 1", 
+                                        diagram_path = "./assets/diagram.png")
+        
+        right_panel.setMaximumWidth(350)
 
-        title_results = TitleResults("Análisis Ejemplo 1")
-        legend_layout.addWidget(title_results)
-
-        ## Diagrama
-        diagram_widget = DiagramWidget("Distribucion de  arboles con deficiencias nutricionales", "./assets/diagram.png")
-        legend_layout.addWidget(diagram_widget)
-        legend_layout.addWidget(self.legend_widget)
-        legend_container.setLayout(legend_layout)
-
-        #self.legend_widget.setMaximumWidth(200)
         inner_layout.addWidget(self.mosaic_view, stretch=4)
-        inner_layout.addWidget(legend_container, stretch=1)
-        title_section_widget = QLabel("Análisis de salud del cultivo")
-        font = QFont()
-        font.setPointSize(18)  # Ajusta el tamaño según tu diseño en Figma
-        font.setBold(True)
-        title_section_widget.setFont(font)
-        title_section_widget.setStyleSheet("padding-left: 15px;")
-        outer_layout.addWidget(title_section_widget)
+        inner_layout.addWidget(right_panel, stretch=1)
+        #title_section_widget = QLabel("Análisis de salud del cultivo")
+        #font = QFont()
+        #font.setPointSize(18)  # Ajusta el tamaño según tu diseño en Figma
+        #font.setBold(True)
+        #title_section_widget.setFont(font)
+        #title_section_widget.setStyleSheet("padding-left: 15px;")
+        #outer_layout.addWidget(title_section_widget)
         outer_layout.addWidget(inner_widget)    
         #layout.addWidget(self.mosaic_view, stretch=4)
         #layout.addSpacing(10)
