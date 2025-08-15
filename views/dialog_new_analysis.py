@@ -3,6 +3,7 @@ from PySide6.QtCore import Qt, Signal, QObject, Slot, QThread
 import os
 from core.utils import get_gps_coordinates, get_image_resolution, get_metadata, calcule_gsd_teorico, get_relative_altitude, get_gimbal_euler_angles
 import pandas as pd
+from multiprocessing import Pool
 
 class InitialConfigureScreen(QFrame):
     def __init__(self, parent = None, dialog_parent=None):
@@ -111,14 +112,20 @@ class MetadataWorker(QObject):
     def run(self):
         total_images = len(self.image_paths)
         for i, path in enumerate(self.image_paths):
-            metadata = self.get_exif_data(path)
-            if metadata:
-                self.metadata_loaded.emit(i, dict(img_relative_path = path, **metadata))
+            try:
+                metadata = self.get_exif_data(path)
+                if metadata:
+                    self.metadata_loaded.emit(i, dict(img_relative_path=path, **metadata))
 
-                progress = int((i + 1) / total_images * 100)
-                self.progress_changed.emit(progress)
-        
+                    progress = int((i + 1) / total_images * 100)
+                    self.progress_changed.emit(progress)
+            except Exception as e:
+                import traceback
+                print(f"Error procesando {path}: {e}")
+                traceback.print_exc()  # Muestra el stack trace completo
+
         self.finished.emit()
+
 
     def get_exif_data(self, image_path):
         metadata = get_metadata(image_path)
@@ -151,7 +158,60 @@ class MetadataWorker(QObject):
        
         return metadata_data
 
+def read_metadata_worker(path):
+    try:
+        metadata = get_metadata(path)
+        latitude, longitude = get_gps_coordinates(metadata)
+        image_width, image_height = get_image_resolution(metadata)
+        yaw_degree, pitch_degree, roll_degree = get_gimbal_euler_angles(metadata)
+        relative_altitude = get_relative_altitude(metadata)
+        GSD_horizontal, GSD_vertical = calcule_gsd_teorico(metadata)
+        datetime = metadata.get("EXIF:DateTimeOriginal")
+        basename = os.path.basename(path)
 
+        return {
+            "name": basename,
+            "latitude": latitude,
+            "longitude": longitude,
+            "yaw_degree": yaw_degree,
+            "pitch_degree": pitch_degree,
+            "roll_degree": roll_degree,
+            "DateTimeOriginal": datetime,
+            "image_width": image_width,
+            "image_height": image_height,
+            "gsd_horizontal": GSD_horizontal,
+            "gsd_vertical": GSD_vertical,
+            "relative_altitude": relative_altitude
+        }
+    except Exception as e:
+        print(f"Error leyendo {path}: {e}")
+        return None
+    
+class MetadataProcessWorker(QObject):
+    progress_changed = Signal(int)         # Progreso %
+    all_metadata_ready = Signal(list)      # Lista con todos los metadatos
+    finished = Signal()
+
+    def __init__(self, image_paths):
+        super().__init__()
+        self.image_paths = image_paths
+
+    
+    @Slot()
+    def run(self):
+        total = len(self.image_paths)
+        results = []
+
+        # Multiprocessing Pool
+        print("Num Cpu:", os.cpu_count())
+        with Pool(processes=4) as pool:
+            for i, data in enumerate(pool.imap(read_metadata_worker, self.image_paths)):
+                results.append(data)
+                self.progress_changed.emit(int((i + 1) / total * 100))
+
+        self.all_metadata_ready.emit(results)
+        self.finished.emit()
+    
 class ImageSelectionScreen(QFrame):
     def __init__(self, parent = None, dialog_parent=None):
         super().__init__(parent)
@@ -300,19 +360,30 @@ class ImageSelectionScreen(QFrame):
         print()
 
         self.qthread = QThread()
-        self.worker = MetadataWorker(image_paths)
+        self.worker = MetadataProcessWorker(image_paths)
         self.worker.moveToThread(self.qthread)
+
         self.qthread.started.connect(self.worker.run)
-        self.worker.metadata_loaded.connect(self.on_metadata_loaded)
         self.worker.progress_changed.connect(self.progress_bar.setValue)
-        self.worker.finished.connect(self.on_metadata_finished)
+        self.worker.all_metadata_ready.connect(self.on_all_metadata_ready)
+        #self.worker.finished.connect(self.on_metadata_finished, Qt.QueuedConnection)
         self.worker.finished.connect(self.qthread.quit)
+        #self.worker.finished.connect(self.worker.deleteLater)
+        #self.worker.finished.connect(self.qthread.deleteLater)
+        # Limpieza automática
         self.worker.finished.connect(self.worker.deleteLater)
-        self.worker.finished.connect(self.qthread.deleteLater)
+        self.qthread.finished.connect(self.qthread.deleteLater)
         self.qthread.start()
 
         return None
-        
+    def on_all_metadata_ready(self, metadata_list):
+        for idx, metadata in enumerate(metadata_list):
+            if metadata:
+                self.dialog_parent.new_analysis_data_store.add_image_data(idx, metadata)
+
+        # Ir a la siguiente pantalla
+        self.dialog_parent.go_to_image_data_table()
+
     def on_metadata_loaded(self, index, metadata):
         self.dialog_parent.new_analysis_data_store.add_image_data(index, metadata)
     

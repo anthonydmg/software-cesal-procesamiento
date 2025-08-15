@@ -237,7 +237,7 @@ class RoundedProgressBar(QProgressBar):
         self.setMinimumHeight(14)
         self.radius = 7  # mitad de la altura
         self.bg_color = QColor("#E5E8EB")
-        self.chunk_color = QColor("#76e900")
+        self.chunk_color = QColor("#07C553")
 
     def paintEvent(self, event):
         painter = QPainter(self)

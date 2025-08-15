@@ -514,7 +514,6 @@ def save_as_geotiff(image, filename, origin_x, origin_y, resolution, ref_zone_lo
     out_ds.FlushCache()
     out_ds = None  # Cerrar el archivo
 
-
 def generate_mosaic(all_images_data, type_align_matrix = "affine", signal_progress = None):
     all_images_data_list = all_images_data.values()
     print("Comienza process_calculate_camera_pose")

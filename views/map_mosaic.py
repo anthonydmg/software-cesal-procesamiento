@@ -17,7 +17,7 @@ class GeoTIFFViewer(QWidget):
         self.mosaic_dir = mosaic_dir
         self.masks_dirs = masks_dirs
         #self.setAutoFillBackground(True)
-        #self.setStyleSheet("background-color: white;")
+        self.setStyleSheet("background-color: black;")
         self.init_ui()
         self.load_layers()
     
@@ -76,13 +76,50 @@ class GeoTIFFViewer(QWidget):
         # Botones de la barra superiores
         #tool_bar_layout = QHBoxLayout()
         self.zoom_in_btn = QToolButton(self)
-        self.zoom_in_btn.setFixedSize(60, 60)
+        self.zoom_in_btn.setFixedSize(30, 30)
         self.zoom_in_btn.setIcon(QIcon("./assets/zoom_in.svg"))
-        self.zoom_out_btn = QToolButton()
+        self.zoom_in_btn.setStyleSheet("""
+            QToolButton {
+                background-color: white;
+                border-radius: 5px;
+                padding: 8px;
+            }
+            QToolButton:hover {
+                background-color: #E0E0E0;
+            }
+        """)
+
+
+        self.zoom_out_btn = QToolButton(self)
+        self.zoom_out_btn.setFixedSize(30, 30)
         self.zoom_out_btn.setIcon(QIcon("./assets/zoom_out.svg"))
-        self.zoom_in_btn.setStyleSheet("padding: 8px;")
-        self.zoom_out_btn.setStyleSheet("padding: 8px;")
         
+        self.zoom_out_btn.setStyleSheet("""
+            QToolButton {
+                background-color: white;
+                border-radius: 5px;
+                padding: 8px;
+            }
+            QToolButton:hover {
+                background-color: #E0E0E0;
+            }
+        """)
+        
+        self.layers_btn = QToolButton(self)
+        self.layers_btn.setFixedSize(30, 30)
+        self.layers_btn.setIcon(QIcon("./assets/layers.svg"))
+
+        self.layers_btn.setStyleSheet("""
+            QToolButton {
+                background-color: white;
+                border-radius: 5px;
+                padding: 8px;
+            }
+            QToolButton:hover {
+                background-color: #E0E0E0;
+            }
+        """)
+
         # Iconos simples
         #self.zoom_in_btn.setText("+")
         #self.zoom_out_btn.setText("-")
@@ -99,6 +136,11 @@ class GeoTIFFViewer(QWidget):
         self.zoom_out_btn.clicked.connect(self.zoom_out)
          # Estado de zoom
         self.zoom_factor = 1.25
+
+        # Al final de init_ui
+        self.zoom_in_btn.raise_()
+        self.zoom_out_btn.raise_()
+        self.layers_btn.raise_()
 
     def zoom_in(self):
         self.view.scale(self.zoom_factor, self.zoom_factor)
@@ -215,13 +257,20 @@ class GeoTIFFViewer(QWidget):
         self.view.scale(factor, factor)
     
     def resizeEvent(self, event):
-        self.zoom_in_btn.move(20, self.height() - 80)  # 20 px desde la izquierda
+        spacing = 10
+        self.zoom_out_btn.move(30, self.height() - self.zoom_out_btn.height() - 30)
+        self.zoom_in_btn.move(30, self.zoom_out_btn.y() - self.zoom_in_btn.height() - spacing)
+        self.layers_btn.move(30, self.zoom_in_btn.y() - self.layers_btn.height() - spacing)
         super().resizeEvent(event)
         self.view.fitInView(self.scene.itemsBoundingRect(), Qt.KeepAspectRatio)
     
     def showEvent(self, event):
         """Ajusta la vista al tamaño inicial de la ventana cuando se muestra por primera vez."""
         super().showEvent(event)
+        spacing = 10
+        self.zoom_out_btn.move(30, self.height() - self.zoom_out_btn.height() - 30)
+        self.zoom_in_btn.move(30, self.zoom_out_btn.y() - self.zoom_in_btn.height() - spacing)
+        self.layers_btn.move(30, self.zoom_in_btn.y() - self.layers_btn.height() - spacing)
         self.view.fitInView(self.scene.itemsBoundingRect(), Qt.KeepAspectRatio)
 
 class LegendItem(QWidget):
@@ -433,6 +482,15 @@ class RightPanelResults(QWidget):
                 background-color: #07C553;
                 font-weight: bold;
                 font-size: 16px;
+                padding-top: 5px;
+                padding-bottom: 5px;
+            }
+
+            QPushButton:hover {
+                background-color: #05A644; /* Un verde más oscuro */
+            }
+            QPushButton:pressed {
+                background-color: #048C38; /* Aún más oscuro al presionar */
             }
         """)
 
@@ -445,6 +503,15 @@ class RightPanelResults(QWidget):
                 background-color: #07C553;
                 font-weight: bold;
                 font-size: 16px;
+                padding-top: 5px;
+                padding-bottom: 5px;
+            }
+                                    
+            QPushButton:hover {
+                background-color: #05A644; /* Un verde más oscuro */
+            }
+            QPushButton:pressed {
+                background-color: #048C38; /* Aún más oscuro al presionar */
             }
         """)
 

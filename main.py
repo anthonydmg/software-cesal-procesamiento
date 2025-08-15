@@ -48,7 +48,7 @@ class MainContent(QWidget):
         super().__init__()
         #self.setWindowTitle("NutriMap Palta")
         3#self.setGeometry(100,100,800,600)
-        self.resize(1200, 720)
+        self.resize(1300, 720)
         #self.showMaximized()
         # Principal
         main_layout = QHBoxLayout(self)
@@ -113,7 +113,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("AgroHass")
         #self.setGeometry(100,100,800,600)
-        self.resize(1200, 720)
+        self.resize(1300, 720)
         #self.setGeometry(100, 100, 800, 600)
         self.create_menu_bar()
         main_widget = QWidget()
