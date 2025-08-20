@@ -1,0 +1,24 @@
+name: software
+channels:
+  - conda-forge
+  - defaults
+  - pytorch
+  - nvidia
+dependencies:
+  - python=3.11
+  - numpy
+  - pandas
+  - gdal                   # librería GIS
+  - folium                 # mapas interactivos
+  - pyproj
+  - pytorch
+  - pytorch-cuda=12.1      # si tienes GPU NVIDIA con CUDA 12.1
+  - pip
+  - pip:
+      - PySide6
+      - PySide6-Addons  
+      - ultralytics        # YOLOv8 y utilidades
+      - python-dotenv
+      - pyexiftool
+      - opencv-python      # OpenCV desde pip
+      # - opencv-python-headless   # alternativo si no necesitas ventanas de OpenCV

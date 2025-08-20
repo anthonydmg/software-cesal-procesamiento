@@ -12,6 +12,11 @@ import time
 from enum import Enum
 from tqdm import tqdm
 from osgeo import gdal, osr
+from scipy.sparse import coo_matrix
+import numpy as np
+from tqdm import tqdm
+from scipy.sparse.linalg import lsqr
+from datetime import datetime
 
 class FusionMethod(Enum):
     SIMPLE_AVERAGE = 1
@@ -160,9 +165,12 @@ def process_terrain_points(images_data):
     return images_data
 
 def estimate_dom_parameters(images_data, margin_extension = 0.1):
-    min_gsd = np.min([m['gsd_horizontal']] for m in images_data)
+    min_gsd = np.min([m['gsd_horizontal'] for m in images_data])
+    print("min_gsd:", min_gsd)
     dom_resolution = min_gsd * 5.1
-    all_coordinates = np.array([m['terrain_points']] for m in images_data)
+    print("Dom resolution")
+    all_coordinates = np.array([m['terrain_points'] for m in images_data]).reshape(-1,2)
+    
     min_x, min_y = np.min(all_coordinates, axis=0)
     max_x, max_y = np.max(all_coordinates, axis=0)
     ancho = max_x - min_x # creo que seria al reves
@@ -275,7 +283,7 @@ def detect_keypoint_descriptors_in_dom(img_dom, corners_img, detector_type = "OR
     return kp_img_dom, desc_img, elapsed_time
 
 def process_detect_keypoint_descriptors_in_dom(images_data, dom_size):
-    for im_data in images_data:
+    for im_data in tqdm(images_data,"keypoints Detection:"):
         im_path = im_data['relative_im_path']
         H_rtk = im_data['H_rtk']
         terrain_points_dom = im_data['terrain_points_dom'].astype(np.int32)
@@ -405,6 +413,68 @@ def correction_to_matrix(correction):
         return correction['matrix']
     return np.eye(3)
 
+def calculate_pairwase_matches(all_images_data):
+    corrected = set()
+    all_terrain_points_dom = [im_data['terrain_points_dom'] for im_data in all_images_data]
+    overlap_graph  = build_overlap_graph(all_terrain_points_dom, min_overlap=0.45)
+    matches =  {}
+    for i, nbrs in tqdm(overlap_graph.items(), desc= "Image"):
+        for j, _ in nbrs:
+            desc_i = all_images_data[i]['desc_img_dom']
+            #kp_img_dom_i = all_images_data[i]['kp_img_dom']
+            desc_j = all_images_data[j]['desc_img_dom']
+            #kp_img_dom_j = all_images_data[j]['kp_img_dom']
+            good_matches = match_keypoints_with_flann(desc_i, desc_j)
+            if len(good_matches) >= 4:  # Mínimo para estimar transformación
+                    matches[(i, j)] = good_matches
+    
+    return matches
+
+def estimate_translation_ransac(src_pts, dst_pts, max_iters=1000, threshold=1.0):
+    """Estimación eficiente de traslación con RANSAC"""
+    best_tx, best_ty, best_inliers = 0, 0, np.zeros(len(src_pts), dtype=bool)
+    for _ in range(max_iters):
+        idx = np.random.randint(len(src_pts))
+        tx = dst_pts[idx,0,0] - src_pts[idx,0,0]
+        ty = dst_pts[idx,0,1] - src_pts[idx,0,1]
+        diff = dst_pts - src_pts - np.array([[[tx, ty]]])
+        current_inliers = np.linalg.norm(diff, axis=2) < threshold
+        if np.sum(current_inliers) > np.sum(best_inliers):
+            best_inliers, best_tx, best_ty = current_inliers, tx, ty
+    M = np.eye(3)
+    M[0,2], M[1,2] = best_tx, best_ty
+    return M, best_inliers
+
+def estimate_pairwise_transforms(all_images_data, matches, transform_type='similarity'):
+    """Estima transformaciones entre pares de imágenes"""
+    transforms = {}
+    inliers = {}
+    
+    for (i, j), match_list in matches.items():
+        #desc_i = all_images_data[i]['desc_img_dom']
+        kp_img_dom_i = all_images_data[i]['kp_img_dom']
+        #desc_j = all_images_data[j]['desc_img_dom']
+        kp_img_dom_j = all_images_data[j]['kp_img_dom']
+        src_pts = np.float32([kp_img_dom_i[m.queryIdx].pt for m in match_list]).reshape(-1, 1, 2)
+        dst_pts = np.float32([kp_img_dom_j[m.trainIdx].pt for m in match_list]).reshape(-1, 1, 2)
+        
+        if transform_type == 'translation':
+            M, mask = estimate_translation_ransac(src_pts, dst_pts)
+        elif transform_type == 'similarity':
+            M, mask = cv2.estimateAffinePartial2D(src_pts, dst_pts, method=cv2.RANSAC)
+            M = np.vstack([M, [0, 0, 1]])
+        elif transform_type == 'affine':
+            M, mask = cv2.estimateAffine2D(src_pts, dst_pts, method=cv2.RANSAC)
+            M = np.vstack([M, [0, 0, 1]])
+        elif transform_type == 'homography':
+            M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC)
+        
+        if mask is not None and np.sum(mask) >= 4:
+            transforms[(i, j)] = M
+            inliers[(i, j)] = [match_list[k] for k in range(len(match_list)) if mask[k]]
+    
+    return transforms, inliers
+
 def propagate_pairwise_correction(all_images_data, type_align_matrix = "affine"):
 #all_images_data = df_images_filtered_slice.reset_index().to_dict(orient='index')
     transforms = {i: np.eye(3) for i in range(len(all_images_data))}
@@ -514,74 +584,478 @@ def save_as_geotiff(image, filename, origin_x, origin_y, resolution, ref_zone_lo
     out_ds.FlushCache()
     out_ds = None  # Cerrar el archivo
 
+def build_lineal_system(all_images_data, inliers, scale_factor):
+    # Inicialización de listas para COO
+    weight = 5
+    row_data = []
+    row_indices = []
+    col_indices = []
+    b_list = []
+    row_counter = 0
+    # 1. Restricciones de referencia (para imagen 0)
+    ref_values = [1, 0, 0, 0, 1, 0]  # a, b, tx, c, d, ty
+    for col_idx, val in enumerate(ref_values):
+        row_data.append(weight)
+        row_indices.append(row_counter)
+        col_indices.append(col_idx)
+        b_list.append(weight * val)
+        row_counter += 1
+    n = len(all_images_data)
+    num_params = 6 * n
+    # 2. Restricciones de similitud: a ≈ d, b ≈ -c
+    for i in range(n):
+        # T₁₁ = T₂₂
+        row_data.extend([1.0, -1.0])
+        row_indices.extend([row_counter] * 2)
+        col_indices.extend([6 * i, 6 * i + 4])
+        b_list.append(0)
+        row_counter += 1
+
+        # T₁₂ = -T₂₁  → T₁₂ + T₂₁ = 0
+        row_data.extend([1.0, 1.0])
+        row_indices.extend([row_counter] * 2)
+        col_indices.extend([6 * i + 1, 6 * i + 3])
+        b_list.append(0)
+        row_counter += 1
+
+
+    # 4. Restricciones de reproyección
+    for (i, j), match_list in tqdm(inliers.items(), desc="Matches"):
+        kp_i = all_images_data[i]['kp_img_dom']
+        kp_j = all_images_data[j]['kp_img_dom']
+        selected_matches = match_list[:60]
+
+        for m in selected_matches:
+            src_pt = np.array([*kp_i[m.queryIdx].pt, 1.0])
+            dst_pt = np.array([*kp_j[m.trainIdx].pt, 1.0])
+
+            # Escalar para evitar magnitudes grandes
+            src_pt_scaled = src_pt * scale_factor
+            dst_pt_scaled = dst_pt * scale_factor
+
+            # Ecuación para coordenada X
+            for k in range(3):
+                row_data.extend([src_pt_scaled[k], -dst_pt_scaled[k]])
+                row_indices.extend([row_counter, row_counter])
+                col_indices.extend([6 * i + k, 6 * j + k])
+            b_list.append(0)
+            row_counter += 1
+
+            # Ecuación para coordenada Y
+            for k in range(3):
+                row_data.extend([src_pt_scaled[k], -dst_pt_scaled[k]])
+                row_indices.extend([row_counter, row_counter])
+                col_indices.extend([6 * i + 3 + k, 6 * j + 3 + k])
+            b_list.append(0)
+            row_counter += 1
+
+    # Construcción del sistema disperso
+    A = coo_matrix((row_data, (row_indices, col_indices)), shape=(row_counter, num_params)).tocsr()
+    b = np.array(b_list)
+    return A, b
+
+
+def solve_global_transforms(A, b, n_images, scale_factor):
+    solution = lsqr(A, b, atol=1e-6, btol=1e-6)[0]
+    # Reorganizar las transformaciones
+    global_transforms = []
+    for i in tqdm(range(n_images), desc="Images"):
+        T1 = solution[6*i:6*i+3]
+        T1[2] = T1[2] / scale_factor
+        T2 = solution[6*i+3:6*i+6]
+        T2[2] = T2[2] / scale_factor
+        M = np.vstack([T1, T2, [0, 0, 1]])
+        global_transforms.append(M)
+    
+    return global_transforms
+
+def create_mosaic(all_images_data, global_transforms, dom_shape):
+    blended = np.zeros((dom_shape[0], dom_shape[1], 3), dtype=np.float32)
+    total_weights = np.zeros((dom_shape[0], dom_shape[1]), dtype=np.float32)
+
+    n_images = len(all_images_data)
+    for index, row in tqdm(all_images_data.items(), total= n_images, desc = "Build Mosaic"):
+        image = cv2.imread(row['relative_im_path'])
+        image_distortion = distortion_correction(image)
+        H_rtk = row['H_rtk']
+        terrain_points_dom = row['terrain_points_dom']
+        imagen_proyectada, mask = direct_project_image_to_dom(image_distortion, H_rtk, dom_shape, terrain_points_dom)
+
+
+        projected_corrected = cv2.warpPerspective(imagen_proyectada, global_transforms[index], (int(dom_shape[1]), int(dom_shape[0])))
+        mask = cv2.warpPerspective(mask, global_transforms[index], (int(dom_shape[1]), int(dom_shape[0])))
+        weights = calculate_weights(mask, None, FusionMethod.ROBUST_DRONE)
+        max_weight = np.max(weights)
+        if max_weight > 0:
+            weights = weights / max_weight
+        update_mask = weights > total_weights
+        blended[update_mask] = projected_corrected[update_mask]
+        total_weights = np.maximum(total_weights, weights)
+
+
+    final_dom = blended.astype(np.uint8).copy()
+    
+    return final_dom
+
 def generate_mosaic(all_images_data, type_align_matrix = "affine", signal_progress = None):
-    all_images_data_list = all_images_data.values()
+    all_images_data_list = list(all_images_data.values())
     print("Comienza process_calculate_camera_pose")
     all_images_data_list = process_calculate_camera_pose(all_images_data_list)
-    signal_progress.emit(55)
+    if signal_progress is not None:
+        signal_progress.emit(55)
     print("Comienza process_terrain_points")
     all_images_data_list = process_terrain_points(all_images_data_list)
-    signal_progress.emit(60)
+    if signal_progress is not None:
+        signal_progress.emit(60)
     print("Comienza estimate_dom_parameters")
     dom_bounds, dom_resolution = estimate_dom_parameters(all_images_data_list, margin_extension = 0.1)
-    signal_progress.emit(65)
-    print("Comienza process_project_corners_to_dom")
-    all_images_data_list = process_project_corners_to_dom(all_images_data_list, dom_bounds, dom_resolution)
-    signal_progress.emit(70)
-    print("Comienza process_detect_keypoint_descriptors_in_dom")
-    all_images_data_list = process_detect_keypoint_descriptors_in_dom(all_images_data_list, dom_size)
-    signal_progress.emit(75)
-    print("Comienza propagate_pairwise_correction")
-    transforms = propagate_pairwise_correction(all_images_data_list, type_align_matrix)
-    signal_progress.emit(85)
-    print("Comienza transformations")
-    #print("Comienza propagate_pairwise_correction")
     width_m = dom_bounds[1] - dom_bounds[0]
     height_m = dom_bounds[3] - dom_bounds[2]
     width_px = int(width_m / dom_resolution)
     height_px = int(height_m / dom_resolution)
     dom_size = (height_px, width_px)
 
-    blended = np.zeros((height_px, width_px, 3), dtype=np.float32)
-    total_weights = np.zeros((height_px, width_px), dtype=np.float32)
-    detector_type = "SIFT"
-    ref_zone_lon = all_images_data[0]['longitude']
-
-    for index, row in enumerate(tqdm(all_images_data, desc = "Build Mosaic")):
-        image = cv2.imread(row['relative_im_path'])
-        image_distortion = distortion_correction(image)
-        #image_distortion = cv2.putText(image_distortion, f"{index}", (image_distortion.shape[1]//2, image_distortion.shape[0]//2), cv2.FONT_HERSHEY_COMPLEX, 8, (0,0,255), thickness= 5)
-        H_rtk = row['H_rtk']
-        terrain_points_dom = row['terrain_points_dom']
-        imagen_proyectada, mask = direct_project_image_to_dom(image_distortion, H_rtk, dom_size, terrain_points_dom)
-
-        projected_corrected = cv2.warpPerspective(imagen_proyectada, transforms[index], (int(dom_size[1]), int(dom_size[0])))
-        mask = cv2.warpPerspective(mask, transforms[index], (int(dom_size[1]), int(dom_size[0])))
-        weights = calculate_weights(mask, None, FusionMethod.ROBUST_DRONE)
-        max_weight = np.max(weights)
-        if max_weight > 0:
-            weights = weights / max_weight
-        #weights = cv2.GaussianBlur(weights, (9, 9), 0)
-        update_mask = weights > total_weights
-        blended[update_mask] = projected_corrected[update_mask]
-        total_weights = np.maximum(total_weights, weights)
+    if signal_progress is not None:
+        signal_progress.emit(65)
+    print("Comienza process_project_corners_to_dom")
+    all_images_data_list = process_project_corners_to_dom(all_images_data_list, dom_bounds, dom_resolution)
+    if signal_progress is not None:
+        signal_progress.emit(70)
+    print("Comienza process_detect_keypoint_descriptors_in_dom")
+    all_images_data_list = process_detect_keypoint_descriptors_in_dom(all_images_data_list, dom_size)
+    if signal_progress is not None:
+        signal_progress.emit(75)
+    print("Comienza propagate_pairwise_correction")
+    matches = calculate_pairwase_matches(all_images_data_list)
+    transforms, inliers = estimate_pairwise_transforms(all_images_data_list, matches, transform_type='affine')
+    scale_factor = 1.0 / dom_size[0]
+    A, b = build_lineal_system(all_images_data, inliers, scale_factor = scale_factor)
+    global_transforms = solve_global_transforms(A.tocsr(), b, len(all_images_data), scale_factor = scale_factor)
+    print("global_transforms:", global_transforms)
+    if signal_progress is not None:
+        signal_progress.emit(85)
+    print("Comienza transformations")
+    #print("Comienza propagate_pairwise_correction")
     
-        progress = int((85 +  15 * index/ len(all_images_data)) * 100)
-        signal_progress.emit(progress)
-    final_dom = blended.astype(np.uint8).copy()
-
-    plt.figure(figsize=(10,10))
-    plt.imshow(cv2.cvtColor(final_dom, cv2.COLOR_BGR2RGB))
-    plt.show()
+    final_dom = create_mosaic(all_images_data, global_transforms, dom_shape = (height_px, width_px))
+    ref_zone_lon = all_images_data[0]['longitude']
     save_as_geotiff(
-            final_dom, f"campo2_mosaico_graph_queue_refine_{type_align_matrix}_{detector_type}_{len(all_images_data)}_images.tif", 
+            final_dom, f"campo2_mosaico_graph_queue_refine_{type_align_matrix}_{len(all_images_data)}_images.tif", 
             dom_bounds[0], dom_bounds[3],  # Esquina superior izquierda (X,Y)
             dom_resolution,
             ref_zone_lon
         )
-    signal_progress.emit(100)
+    if signal_progress is not None:
+        signal_progress.emit(100)
+
+class ImageSticher():
+    def __init__(self, images_data, on_progress_change = None):
+        self.images_data = images_data
+        self.on_progress_change = on_progress_change
+    
+    def process_calculate_camera_pose(self, images_data):
+        for im_data in images_data:
+            im_data['camera_pose'] = calculate_camera_pose(im_data)
+        return images_data
+    
+    def process_terrain_points(self, images_data):
+        for im_data in images_data:
+            im_data['terrain_points'] = corners_to_terrain_points(im_data)
+        return images_data
+
+    def estimate_dom_parameters(self, images_data, margin_extension = 0.1, target_resolution = None, scale_factor = 5.1):
+        min_gsd = np.min([m['gsd_horizontal'] for m in images_data])
+        print("min_gsd:", min_gsd)
+        
+        if target_resolution is None:
+            dom_resolution = min_gsd * scale_factor
+        else:
+            dom_resolution = target_resolution
+
+        print("Dom resolution:", dom_resolution)
+        all_coordinates = np.array([m['terrain_points'] for m in images_data]).reshape(-1,2)
+        
+        min_x, min_y = np.min(all_coordinates, axis=0)
+        max_x, max_y = np.max(all_coordinates, axis=0)
+        ancho = max_x - min_x # creo que seria al reves
+        alto = max_y - min_y
+
+        min_x -= ancho * margin_extension
+        max_x += ancho * margin_extension
+        min_y -= alto * margin_extension
+        max_y += alto * margin_extension
+        return (min_x, max_x, min_y, max_y), dom_resolution
+
+    def process_project_corners_to_dom(self, images_data, dom_bounds, dom_resolution):
+        for im_data in images_data:
+            terrain_points_dom, H = project_corners_to_dom((im_data["image_height"], im_data["image_width"]), dom_bounds, dom_resolution, im_data['terrain_points'])
+            im_data['terrain_points_dom'] = terrain_points_dom
+            im_data['H_rtk'] = H
+
+        return images_data
+
+    def process_detect_keypoint_descriptors_in_dom(self, images_data, dom_size):
+        for i, im_data in enumerate(tqdm(images_data, desc="Keypoints Detection")):
+            #print("im_data:", im_data)
+            im_path = im_data['relative_path']
+            H_rtk = im_data['H_rtk']
+            terrain_points_dom = im_data['terrain_points_dom'].astype(np.int32)
+            img = cv2.imread(im_path)
+            img_undistorned = distortion_correction(img)
+            imagen_proyectada, _ = direct_project_image_to_dom(img_undistorned, H_rtk, dom_size, terrain_points_dom)
+            kp, desc, _ = detect_keypoint_descriptors_in_dom(imagen_proyectada, terrain_points_dom, detector_type = "ORB", draw_keypoints = False)
+            im_data['kp_img_dom'] = kp
+            im_data['desc_img_dom'] = desc
+            self.progress_update(8 + ((i * 20)// len(images_data)))
+        return images_data
+    
+    def calculate_pairwase_matches(self, all_images_data):
+        all_terrain_points_dom = [im_data['terrain_points_dom'] for im_data in all_images_data]
+        overlap_graph  = build_overlap_graph(all_terrain_points_dom, min_overlap=0.45)
+        matches =  {}
+        for i, nbrs in tqdm(overlap_graph.items(), desc= "Image"):
+            for j, _ in nbrs:
+                desc_i = all_images_data[i]['desc_img_dom']
+                #kp_img_dom_i = all_images_data[i]['kp_img_dom']
+                desc_j = all_images_data[j]['desc_img_dom']
+                #kp_img_dom_j = all_images_data[j]['kp_img_dom']
+                good_matches = match_keypoints_with_flann(desc_i, desc_j)
+                if len(good_matches) >= 4:  # Mínimo para estimar transformación
+                        matches[(i, j)] = good_matches
+            self.progress_update(20 + ((i * 30)// len(all_images_data)))
+        
+        return matches
+    
+    def build_linear_system(self, all_images_data, inliers, scale_factor):
+    # Inicialización de listas para COO
+        weight = 10
+        row_data = []
+        row_indices = []
+        col_indices = []
+        b_list = []
+        row_counter = 0
+        # 1. Restricciones de referencia (para imagen 0)
+        ref_values = [1, 0, 0, 0, 1, 0]  # a, b, tx, c, d, ty
+        for col_idx, val in enumerate(ref_values):
+            row_data.append(weight)
+            row_indices.append(row_counter)
+            col_indices.append(col_idx)
+            b_list.append(weight * val)
+            row_counter += 1
+        n = len(all_images_data)
+        num_params = 6 * n
+        # 2. Restricciones de similitud: a ≈ d, b ≈ -c
+        for i in range(n):
+            # T₁₁ = T₂₂
+            row_data.extend([1.0, -1.0])
+            row_indices.extend([row_counter] * 2)
+            col_indices.extend([6 * i, 6 * i + 4])
+            b_list.append(0)
+            row_counter += 1
+
+            # T₁₂ = -T₂₁  → T₁₂ + T₂₁ = 0
+            row_data.extend([1.0, 1.0])
+            row_indices.extend([row_counter] * 2)
+            col_indices.extend([6 * i + 1, 6 * i + 3])
+            b_list.append(0)
+            row_counter += 1
+
+
+        # 4. Restricciones de reproyección
+        for (i, j), match_list in tqdm(inliers.items(), desc="Matches"):
+            kp_i = all_images_data[i]['kp_img_dom']
+            kp_j = all_images_data[j]['kp_img_dom']
+            selected_matches = match_list[:60]
+
+            for m in selected_matches:
+                src_pt = np.array([*kp_i[m.queryIdx].pt, 1.0])
+                dst_pt = np.array([*kp_j[m.trainIdx].pt, 1.0])
+
+                # Escalar para evitar magnitudes grandes
+                src_pt_scaled = src_pt * scale_factor
+                dst_pt_scaled = dst_pt * scale_factor
+
+                # Ecuación para coordenada X
+                for k in range(3):
+                    row_data.extend([src_pt_scaled[k], -dst_pt_scaled[k]])
+                    row_indices.extend([row_counter, row_counter])
+                    col_indices.extend([6 * i + k, 6 * j + k])
+                b_list.append(0)
+                row_counter += 1
+
+                # Ecuación para coordenada Y
+                for k in range(3):
+                    row_data.extend([src_pt_scaled[k], -dst_pt_scaled[k]])
+                    row_indices.extend([row_counter, row_counter])
+                    col_indices.extend([6 * i + 3 + k, 6 * j + 3 + k])
+                b_list.append(0)
+                row_counter += 1
+
+        # Construcción del sistema disperso
+        A = coo_matrix((row_data, (row_indices, col_indices)), shape=(row_counter, num_params)).tocsr()
+        b = np.array(b_list)
+        return A, b
+
+    def solve_global_transforms(self, A, b, n_images, scale_factor):
+        solution = lsqr(A, b, atol=1e-6, btol=1e-6)[0]
+        # Reorganizar las transformaciones
+        global_transforms = []
+        for i in tqdm(range(n_images), desc="Images"):
+            T1 = solution[6*i:6*i+3]
+            T1[2] = T1[2] / scale_factor
+            T2 = solution[6*i+3:6*i+6]
+            T2[2] = T2[2] / scale_factor
+            M = np.vstack([T1, T2, [0, 0, 1]])
+            global_transforms.append(M)
+        
+        return global_transforms
+
+    def create_mosaic(self, all_images_data, global_transforms, dom_shape):
+        blended = np.zeros((dom_shape[0], dom_shape[1], 3), dtype=np.float32)
+        total_weights = np.zeros((dom_shape[0], dom_shape[1]), dtype=np.float32)
+
+        n_images = len(all_images_data)
+        for index, row in tqdm(all_images_data.items(), total= n_images, desc = "Build Mosaic"):
+            image = cv2.imread(row['relative_path'])
+            image_distortion = distortion_correction(image)
+            H_rtk = row['H_rtk']
+            terrain_points_dom = row['terrain_points_dom']
+            imagen_proyectada, mask = direct_project_image_to_dom(image_distortion, H_rtk, dom_shape, terrain_points_dom)
+
+            projected_corrected = cv2.warpPerspective(imagen_proyectada, global_transforms[index], (int(dom_shape[1]), int(dom_shape[0])))
+            mask = cv2.warpPerspective(mask, global_transforms[index], (int(dom_shape[1]), int(dom_shape[0])))
+            weights = calculate_weights(mask, None, FusionMethod.ROBUST_DRONE)
+            max_weight = np.max(weights)
+            if max_weight > 0:
+                weights = weights / max_weight
+            update_mask = weights > total_weights
+            blended[update_mask] = projected_corrected[update_mask]
+            total_weights = np.maximum(total_weights, weights)
+            
+            self.progress_update(40 + ((index * 50)// n_images))
+
+        final_dom = blended.astype(np.uint8).copy()
+        
+        return final_dom
+
+    def save_as_geotiff(self, image, filename, origin_x, origin_y, resolution, ref_zone_lon, transparent_bg = True, alpha = 1.0):
+        """Guarda una imagen numpy como GeoTIFF georreferenciado"""
+        driver = gdal.GetDriverByName('GTiff')
+        rows, cols, bands = image.shape
+        
+        out_ds = driver.Create(
+            filename, 
+            cols, 
+            rows, 
+            bands + 1 if transparent_bg else bands, 
+            gdal.GDT_Byte)
+        # Establecer georreferenciación
+        out_ds.SetGeoTransform((
+            origin_x,    # Coordenada X del píxel superior izquierdo
+            resolution,   # Tamaño de píxel en X (resolución)
+            0,           # Rotación (0 si el norte está arriba)
+            origin_y,    # Coordenada Y del píxel superior izquierdo
+            0,           # Rotación (0 si el norte está arriba)
+            -resolution  # Tamaño de píxel en Y (negativo porque el origen es la esquina superior)
+        ))
+
+        # Establecer sistema de referencia espacial (WGS84 UTM por ejemplo)
+            # Sistema de coordenadas (ej: UTM zona 18S para Perú)
+        srs = osr.SpatialReference()
+        zone = int((ref_zone_lon + 180) // 6 + 1)  # Corregido para usar coordenada x (origin[0])
+        epsg = 32700 + zone #if origin_y < 0 else 32600 + zone  # 326XX para norte, 327XX para sur
+        print("epsg:", epsg)
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(epsg)  # Cambiar al EPSG adecuado para tu zona UTM
+        out_ds.SetProjection(srs.ExportToWkt())
+
+        for b in range(bands):
+            out_band = out_ds.GetRasterBand(b+1)
+            out_band.WriteArray(image[:, :, 2-b])
+            out_band.FlushCache()
+            
+        if transparent_bg:
+            #Crear y escribir banda Alpha (0 donde la imagen es cero)
+            alpha_band = np.ones((image.shape[0], image.shape[1]), dtype=np.uint8) * 255
+            # Verificar si todos los canales son cero (píxel transparente)
+            zero_mask = np.all(image == 0, axis=2)
+            alpha_band[zero_mask] = 0
+            if alpha < 1.0:
+                alpha_band = (alpha_band * alpha).astype(np.uint8)
+
+            out_ds.GetRasterBand(4).WriteArray(alpha_band)
+            # Configurar la banda 4 como canal alpha
+            out_ds.GetRasterBand(4).SetColorInterpretation(gdal.GCI_AlphaBand)
+    
+        out_ds.FlushCache()
+        out_ds = None  # Cerrar el archivo
+
+    def progress_update(self, percentaje):
+        if self.on_progress_change is not None:
+            self.on_progress_change(percentaje)
+
+    
+    def run(self, name_file = None, prefix_name = None):
+        all_images_data_list = list(self.images_data.values())
+        print("Comienza process_calculate_camera_pose")
+        all_images_data_list = self.process_calculate_camera_pose(all_images_data_list)
+        self.progress_update(2)
+
+        print("Comienza process_terrain_points")
+        all_images_data_list = self.process_terrain_points(all_images_data_list)
+        self.progress_update(4)
+        print("Comienza estimate_dom_parameters")
+        dom_bounds, dom_resolution = self.estimate_dom_parameters(all_images_data_list, margin_extension = 0.1)
+        self.progress_update(6)
+
+        width_m = dom_bounds[1] - dom_bounds[0]
+        height_m = dom_bounds[3] - dom_bounds[2]
+        width_px = int(width_m / dom_resolution)
+        height_px = int(height_m / dom_resolution)
+        dom_size = (height_px, width_px)
+        print("Comienza process_project_corners_to_dom")
+        all_images_data_list = self.process_project_corners_to_dom(all_images_data_list, dom_bounds, dom_resolution)
+        self.progress_update(8)
+        print("Comienza process_detect_keypoint_descriptors_in_dom")
+        all_images_data_list = self.process_detect_keypoint_descriptors_in_dom(all_images_data_list, dom_size)
+        self.progress_update(20)
+        print("Comienza calculate_pairwase_matches")
+        matches = self.calculate_pairwase_matches(all_images_data_list)
+        self.progress_update(30)
+        scale_factor = 1.0 / dom_size[0]
+        print("scale_factor:", scale_factor)
+        A, b = self.build_linear_system(self.images_data, matches, scale_factor = scale_factor)
+        global_transforms = self.solve_global_transforms(A.tocsr(), b, len(all_images_data_list), scale_factor = scale_factor)
+        print("global_transforms:", global_transforms)
+        self.progress_update(40)
+        print("Comienza transformations")
+        #print("Comienza propagate_pairwise_correction")
+        
+        final_dom = self.create_mosaic(self.images_data, global_transforms, dom_shape = (height_px, width_px))
+        self.progress_update(90)
+        ref_zone_lon = self.images_data[0]['longitude']
+        
+        if name_file is None:
+            name_file = datetime.now().strftime("%Y%m%d_%H%M%S") + ".tif"
+            name_file = prefix_name + "_" + name_file if prefix_name else name_file
+
+        self.save_as_geotiff(
+                final_dom, name_file, 
+                dom_bounds[0], dom_bounds[3],  # Esquina superior izquierda (X,Y)
+                dom_resolution,
+                ref_zone_lon
+            )
+        
+        self.progress_update(100)
+    
+        
 if __name__ == "__main__":
-    print()
+    import pandas as pd
+    df_images = pd.read_csv("./df_images_metadata.csv")
+    #generate_mosaic(df_images.to_dict(orient='index'), type_align_matrix = "affine", signal_progress = None)
+    image_sticher = ImageSticher( images_data =  df_images.to_dict(orient='index'))
+
+    image_sticher.run(prefix_name="Vuelo-Agosto-15-Campo2-Accopampa")
     #generate_mosaic(all_images_data, type_align_matrix = "affine")
 #type_align_matrix = "affine"
 #transforms = propagate_pairwise_correction(df_images_filtered_slice.reset_index().to_dict(orient='index'), type_align_matrix)

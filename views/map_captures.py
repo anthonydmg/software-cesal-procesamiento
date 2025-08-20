@@ -8,12 +8,13 @@ import os
 import json
 import traceback
 import torch
-from sahi import AutoDetectionModel
-from sahi.predict import get_prediction
+#from sahi import AutoDetectionModel
+#from sahi.predict import get_prediction
 from datetime import datetime
 import gc
 import numpy as np
-from core.processing import generate_mosaic
+from core.processing import generate_mosaic, ImageSticher
+
 
 MAPBOX_TOKEN = os.getenv("MAPBOX_TOKEN")
 
@@ -112,16 +113,17 @@ class MemoryAwareYOLOModel:
         return "cpu"
     
     def _load_model(self):
-        model = AutoDetectionModel.from_pretrained(
-            model_type='yolo11',
-            model_path='C:/Users/Anthony/Local/cesal-proyecto/avocado-trees-identication/yolo11s-seg-finituned.pt',
-            confidence_threshold=0.5,
-            device=self.device,
-        )
+        model = None
+        #AutoDetectionModel.from_pretrained(
+        #    model_type='yolo11',
+        #    model_path='C:/Users/Anthony/Local/cesal-proyecto/avocado-trees-identication/yolo11s-seg-finituned.pt',
+        #    confidence_threshold=0.5,
+        #    device=self.device,
+        #)
         
-        if hasattr(model, 'model'):
-            for param in model.model.parameters():
-                param.requires_grad = False
+        #if hasattr(model, 'model'):
+        #    for param in model.model.parameters():
+        #        param.requires_grad = False
         return model
     
     def predict_with_memory_management(self, image_path: str):
@@ -131,7 +133,7 @@ class MemoryAwareYOLOModel:
             
             self._clean_memory()
             print("image_path:", image_path)
-            result = get_prediction(image_path, self.model)
+            result = None #get_prediction(image_path, self.model)
             print("result:", result)
             predictions = {
                 'bboxes': [], 
@@ -183,7 +185,7 @@ class ImageProcessor(QObject):
         self.result_storage = result_storage
         self.is_running = True
         self.batch_size = 2
-        self.model = MemoryAwareYOLOModel.get_instance()
+        #self.model = MemoryAwareYOLOModel.get_instance()
 
     def process(self):
         try:
@@ -194,6 +196,7 @@ class ImageProcessor(QObject):
             for img_id, img_data in self.image_data.items():
                 if not self.is_running:
                     break
+                continue
 
                 img_path = img_data['img_relative_path']
                 try:
@@ -219,9 +222,10 @@ class ImageProcessor(QObject):
                 except Exception as e:
                     print(f"Error en {img_id}: {str(e)}")
             print("Comienza Generacion de Mosaico")
-            #generate_mosaic(self.image_data, signal_progress=self.progress_updated)
-
-            final_path = self.result_storage.merge_results()
+            images_sticher = ImageSticher(images_data = self.image_data, 
+                         on_progress_change = lambda progress: self.progress_updated.emit(progress))
+            images_sticher.run()
+            #final_path = self.result_storage.merge_results()
             self.finished.emit()
 
         except Exception as e:
@@ -565,11 +569,11 @@ class MapCaptures(QWidget):
         import time
         """Simula el progreso y actualiza el mapa al finalizar"""
         self.images_data = self.main_window.analysis_data_store.images_data
-        #self.setup_processing_thread()
-        for i in range(101):
-            self.progress_bar.setValue(i)
-            QApplication.processEvents()
-            time.sleep(0.05)
+        self.setup_processing_thread()
+        #for i in range(101):
+        #    self.progress_bar.setValue(i)
+        #    QApplication.processEvents()
+        #    time.sleep(0.05)
             
         #self.main_window.switch_page(2)
         # Simular actualización de datos y regenerar el mapa

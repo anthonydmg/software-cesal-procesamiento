@@ -170,6 +170,7 @@ def read_metadata_worker(path):
         basename = os.path.basename(path)
 
         return {
+            "relative_path": path,
             "name": basename,
             "latitude": latitude,
             "longitude": longitude,

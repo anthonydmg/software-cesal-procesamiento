@@ -60,6 +60,7 @@ logs/
 # Archivos temporales y caché
 *.tmp
 *.bak
+*.tif
 ~*
 .DS_Store
 data/
