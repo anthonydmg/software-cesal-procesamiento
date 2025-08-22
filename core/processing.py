@@ -18,6 +18,7 @@ from tqdm import tqdm
 from scipy.sparse.linalg import lsqr
 from datetime import datetime
 
+
 class FusionMethod(Enum):
     SIMPLE_AVERAGE = 1
     SEAM_BLENDING = 2
@@ -910,33 +911,72 @@ class ImageSticher():
         
         return global_transforms
 
+    def seg_pts_transform(self, segs, H):
+        print("segs:", segs)
+        print("len(segs):", len(segs))
+        segs_warped = []
+        for poly in segs:
+            pts = np.array(poly, dtype=np.float32).reshape(-1, 1, 2)
+            pts_warped = cv2.perspectiveTransform(pts, H)
+            pts_warped = pts_warped.reshape(-1, 2)
+            segs_warped.append(pts_warped)
+        return segs_warped
+
+
     def create_mosaic(self, all_images_data, global_transforms, dom_shape):
         blended = np.zeros((dom_shape[0], dom_shape[1], 3), dtype=np.float32)
         total_weights = np.zeros((dom_shape[0], dom_shape[1]), dtype=np.float32)
-
+        
+        trees_mask = np.zeros((dom_shape[0], dom_shape[1]), dtype=np.uint8)
         n_images = len(all_images_data)
+        
         for index, row in tqdm(all_images_data.items(), total= n_images, desc = "Build Mosaic"):
+            # Image Projection to Dom
             image = cv2.imread(row['relative_path'])
             image_distortion = distortion_correction(image)
             H_rtk = row['H_rtk']
             terrain_points_dom = row['terrain_points_dom']
             imagen_proyectada, mask = direct_project_image_to_dom(image_distortion, H_rtk, dom_shape, terrain_points_dom)
-
+            
+            # Correction
             projected_corrected = cv2.warpPerspective(imagen_proyectada, global_transforms[index], (int(dom_shape[1]), int(dom_shape[0])))
+            
+            # Trees Masks
+            segs_dom = self.seg_pts_transform(row['segmentations'], H_rtk)
+            segs_dom = self.seg_pts_transform(segs_dom, global_transforms[index])
+            segs_dom_int = [np.array(poly, dtype=np.int32) for poly in segs_dom]
+            
+            trees_mask_image = np.zeros((dom_shape[0], dom_shape[1]), dtype=np.uint8)
+            cv2.fillPoly(trees_mask_image, segs_dom_int, 255)
+
+            #segs_dom = cv2.perspectiveTransform(segs_dom.reshape(-1, 1, 2), global_transforms[index]).reshape(-1, 2)
+
+            # Blended
             mask = cv2.warpPerspective(mask, global_transforms[index], (int(dom_shape[1]), int(dom_shape[0])))
             weights = calculate_weights(mask, None, FusionMethod.ROBUST_DRONE)
+            
             max_weight = np.max(weights)
             if max_weight > 0:
                 weights = weights / max_weight
+
+            for poly in segs_dom_int:
+                mask_poly = np.zeros((dom_shape[0], dom_shape[1]), dtype=np.uint8)
+                cv2.fillPoly(mask_poly, [poly], 1)
+                val_weights = weights[mask_poly == 1]
+                weights[mask_poly == 1] = val_weights.max()
+
+            
             update_mask = weights > total_weights
             blended[update_mask] = projected_corrected[update_mask]
             total_weights = np.maximum(total_weights, weights)
+          
+            trees_mask[update_mask] = trees_mask_image[update_mask]
             
             self.progress_update(40 + ((index * 50)// n_images))
 
         final_dom = blended.astype(np.uint8).copy()
         
-        return final_dom
+        return final_dom, trees_mask
 
     def save_as_geotiff(self, image, filename, origin_x, origin_y, resolution, ref_zone_lon, transparent_bg = True, alpha = 1.0):
         """Guarda una imagen numpy como GeoTIFF georreferenciado"""
@@ -947,7 +987,7 @@ class ImageSticher():
             filename, 
             cols, 
             rows, 
-            bands + 1 if transparent_bg else bands, 
+            4 if transparent_bg else 3, 
             gdal.GDT_Byte)
         # Establecer georreferenciación
         out_ds.SetGeoTransform((
@@ -969,9 +1009,12 @@ class ImageSticher():
         srs.ImportFromEPSG(epsg)  # Cambiar al EPSG adecuado para tu zona UTM
         out_ds.SetProjection(srs.ExportToWkt())
 
-        for b in range(bands):
+        for b in range(3):
             out_band = out_ds.GetRasterBand(b+1)
-            out_band.WriteArray(image[:, :, 2-b])
+            if bands > 1:
+                out_band.WriteArray(image[:, :, 2-b])
+            else:
+                out_band.WriteArray(image[:, :, 0])
             out_band.FlushCache()
             
         if transparent_bg:
@@ -995,7 +1038,7 @@ class ImageSticher():
             self.on_progress_change(percentaje)
 
     
-    def run(self, name_file = None, prefix_name = None):
+    def run(self, name_file = None, prefix_name = None, save_dir = "./mosaic"):
         all_images_data_list = list(self.images_data.values())
         print("Comienza process_calculate_camera_pose")
         all_images_data_list = self.process_calculate_camera_pose(all_images_data_list)
@@ -1024,38 +1067,69 @@ class ImageSticher():
         self.progress_update(30)
         scale_factor = 1.0 / dom_size[0]
         print("scale_factor:", scale_factor)
+        
         A, b = self.build_linear_system(self.images_data, matches, scale_factor = scale_factor)
         global_transforms = self.solve_global_transforms(A.tocsr(), b, len(all_images_data_list), scale_factor = scale_factor)
         print("global_transforms:", global_transforms)
         self.progress_update(40)
         print("Comienza transformations")
-        #print("Comienza propagate_pairwise_correction")
         
-        final_dom = self.create_mosaic(self.images_data, global_transforms, dom_shape = (height_px, width_px))
+        final_dom, trees_mask = self.create_mosaic(self.images_data, 
+                                       global_transforms, 
+                                       dom_shape = (height_px, width_px))
         self.progress_update(90)
         ref_zone_lon = self.images_data[0]['longitude']
         
         if name_file is None:
             name_file = datetime.now().strftime("%Y%m%d_%H%M%S") + ".tif"
             name_file = prefix_name + "_" + name_file if prefix_name else name_file
+        
+        os.makedirs(save_dir, exist_ok=True)
 
         self.save_as_geotiff(
-                final_dom, name_file, 
+                final_dom, 
+                f"{save_dir}/{name_file}", 
                 dom_bounds[0], dom_bounds[3],  # Esquina superior izquierda (X,Y)
                 dom_resolution,
                 ref_zone_lon
-            )
+        )
         
+        final_dom_out = final_dom.copy()
+        final_dom_out[trees_mask > 0] = [0, 255, 0]
+        alpha = 0.45
+
+        final_out = cv2.addWeighted(final_dom_out, alpha, final_dom, 1-alpha, 0)
+
+        self.save_as_geotiff(
+            final_out,
+            f"{save_dir}/{name_file[:-4]}_TREES_RESULT.tif",
+            dom_bounds[0], dom_bounds[3],  # Esquina superior izquierda (X,Y)
+            dom_resolution,
+            ref_zone_lon
+        )
+
+        self.save_as_geotiff(
+            np.expand_dims(trees_mask, axis=-1),
+            f"{save_dir}/{name_file[:-4]}_MASK_TREES.tif",
+            dom_bounds[0], dom_bounds[3],  # Esquina superior izquierda (X,Y)
+            dom_resolution,
+            ref_zone_lon,
+            alpha=0.5
+        )
+        
+
         self.progress_update(100)
-    
-        
+
 if __name__ == "__main__":
     import pandas as pd
     df_images = pd.read_csv("./df_images_metadata.csv")
+    df_images_slice = df_images.iloc[0,:50]
+    print(df_images_slice)
     #generate_mosaic(df_images.to_dict(orient='index'), type_align_matrix = "affine", signal_progress = None)
-    image_sticher = ImageSticher( images_data =  df_images.to_dict(orient='index'))
+    image_sticher = ImageSticher(images_data =  df_images_slice.to_dict(orient='index'))
 
-    image_sticher.run(prefix_name="Vuelo-Agosto-15-Campo2-Accopampa")
+    image_sticher.run(save_dir = "./mosaic", 
+                      prefix_name="Vuelo-Agosto-15-Campo2-Accopampa")
     #generate_mosaic(all_images_data, type_align_matrix = "affine")
 #type_align_matrix = "affine"
 #transforms = propagate_pairwise_correction(df_images_filtered_slice.reset_index().to_dict(orient='index'), type_align_matrix)
