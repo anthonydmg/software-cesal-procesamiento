@@ -71,6 +71,8 @@ def padding_to_square_image(image):
 
     return img_squared
 
+IM_SIZE = 1280#640
+
 class TreeDetectorYolo:
     _instance = None
     _mutex = QMutex()
@@ -100,18 +102,8 @@ class TreeDetectorYolo:
         return "cpu"
     
     def _load_model(self):
-        model = YOLO("./yolo11m-seg-finituned-2-split.pt", task= 'segment')
+        model = YOLO("./yolo11s-seg-finituned-2-split-1280.pt", task= 'segment')
 
-        #AutoDetectionModel.from_pretrained(
-        #    model_type='yolo11',
-        #    model_path='C:/Users/Anthony/Local/cesal-proyecto/avocado-trees-identication/yolo11s-seg-finituned.pt',
-        #    confidence_threshold=0.5,
-        #    device=self.device,
-        #)
-        
-        #if hasattr(model, 'model'):
-        #    for param in model.model.parameters():
-        #        param.requires_grad = False
         return model
     
     def resize_and_unpad_mask(self, mask, original_shape, pad_shape):
@@ -137,11 +129,16 @@ class TreeDetectorYolo:
                 save_dir =  "./results"):
         
         all_results = []
+        print("save_dir:", save_dir)
+        os.makedirs(save_dir, exist_ok=True)
+        os.makedirs(f"{save_dir}/visualizations", exist_ok=True)
+        os.makedirs(f"{save_dir}/detections", exist_ok=True)
+
         for image_path in tqdm(image_paths, desc= "Trees Deteccion"):
             try:
                 if not os.path.exists(image_path):
                     raise FileNotFoundError(f"Imagen no encontrada: {image_path}")
-                os.makedirs(save_dir, exist_ok=True)
+                
                 self._clean_memory()
                 print("image_path:", image_path)
                 image = cv2.imread(image_path)
@@ -149,8 +146,8 @@ class TreeDetectorYolo:
                 image = distortion_correction(image)
                 im_padded = padding_to_square_image(image)
                 h_im_pad, w_im_pad = im_padded.shape[:2]
-                im_resized = cv2.resize(im_padded, (640, 640), interpolation=cv2.INTER_LANCZOS4)
-                results = self.model.predict(im_resized, imgsz = (640, 640), conf=0.5)
+                im_resized = cv2.resize(im_padded, (IM_SIZE, IM_SIZE), interpolation=cv2.INTER_LANCZOS4)
+                results = self.model.predict(im_resized, imgsz = (IM_SIZE, IM_SIZE), conf=0.5)
                 predictions = dict(
                     bboxes= [], 
                     #masks= [], 
@@ -159,7 +156,7 @@ class TreeDetectorYolo:
                     scores= [], 
                     timestamp= datetime.now().isoformat()
                 )
-                scale_factor = w_im_pad / 640
+                scale_factor = w_im_pad / IM_SIZE
                 for r in results:
                     if r.boxes is not None:
                         boxes = r.boxes.xyxy.cpu().numpy()
@@ -190,11 +187,11 @@ class TreeDetectorYolo:
                                         predictions["scores"],
                                         predictions['bboxes'])
                 filename = os.path.basename(image_path)[:-4]
-                os.makedirs(f"./{save_dir}/visualizations", exist_ok=True)
-                cv2.imwrite(f"./{save_dir}/visualizations/{filename}_RESULT.png", im_result)
                 
-                os.makedirs(f"./{save_dir}/detections", exist_ok=True)
-                with open(f"./{save_dir}/detections/{filename}_DETECTIONS.json", "w", encoding="utf-8") as f:
+                cv2.imwrite(f"{save_dir}/visualizations/{filename}_RESULT.png", im_result)
+                
+                
+                with open(f"{save_dir}/detections/{filename}_DETECTIONS.json", "w", encoding="utf-8") as f:
                     json.dump({"image_path": image_path, "detecctions": predictions}, f, indent= 4, ensure_ascii= True)
                
             except Exception as e:

@@ -72,3 +72,7 @@ mosaico_3_images/
 segmentacion_results/
 mosaicos/
 results/
+analisis/
+*.pt
+*.png
+*.csv

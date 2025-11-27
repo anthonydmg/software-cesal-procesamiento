@@ -56,7 +56,7 @@ class MainContent(QWidget):
         main_layout.setSpacing(0)  # <- elimina espacio entre widgets intern
         # Navbar lateral
         self.navbar = QListWidget()
-
+        self.analysis_data_store = AnalysisData()
 
         #self.navbar.setIconSize(QSize(64, 64))  # Tamaño grande del icono
         self.navbar.setFlow(QListWidget.TopToBottom)  # Icono arriba y texto abajo
@@ -80,6 +80,11 @@ class MainContent(QWidget):
         self.navbar.setItemWidget(item3, NavItem("./assets/map-marker.svg", "Mapa Arboles"))
         self.navbar.setFixedWidth(105)
         self.navbar.currentRowChanged.connect(self.switch_page)
+
+        # Desabilitados los items
+        #self.disable_nav_item(1)
+        #self.disable_nav_item(2)
+       
         # Contenedor central
         self.stack = QStackedWidget()
         # Contenido
@@ -93,16 +98,51 @@ class MainContent(QWidget):
         # Agregar widgets al layout principal
         main_layout.addWidget(self.navbar)
         main_layout.addWidget(self.stack)
-        self.analysis_data_store = AnalysisData()
+        
         self.setLayout(main_layout)
 
-    def switch_page(self, index):
+
+    def disable_nav_item(self, index: int):
+        """
+        Deshabilita un item del navbar tanto a nivel de QListWidgetItem
+        como visualmente en su widget asociado.
+        """
+        item = self.navbar.item(index)
+        if item:
+            # Quitar flag de enabled al QListWidgetItem
+            item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
+
+            # Si tiene un widget asociado (NavItem), deshabilitarlo también
+            widget = self.navbar.itemWidget(item)
+            if widget:
+                widget.setDisabled(True)
+    
+    def enable_nav_item(self, index: int):
+        """
+        Habilita un item del navbar tanto a nivel de QListWidgetItem
+        como visualmente en su widget asociado.
+        """
+        item = self.navbar.item(index)
+        if item:
+            # Restaurar flag de enabled al QListWidgetItem
+            item.setFlags(item.flags() | Qt.ItemIsEnabled)
+
+            # Si tiene un widget asociado (NavItem), habilitarlo también
+            widget = self.navbar.itemWidget(item)
+            if widget:
+                widget.setDisabled(False)
+        
+
+    def switch_page(self, index, setNavItem = False):
         self.stack.setCurrentIndex(index)
+        if setNavItem:
+            self.navbar.setCurrentRow(index) 
         
     def update_analysis_data(self, analysis_data_store):
         self.analysis_data_store = analysis_data_store
         self.page_map_images.update_map_view(self.analysis_data_store.images_data)
         self.navbar.setCurrentRow(1)  # Cambiar al segundo ítem del navbar
+        self.enable_nav_item(1)
 
     def on_finish_configure(self):
         #self.page_map_images.update_map_view()
@@ -161,72 +201,6 @@ class MainWindow(QMainWindow):
     
     def show_about(self):
         pass
-
-class MainWindowPrev(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("NutriHass")
-        #self.setGeometry(100,100,800,600)
-        self.resize(1200, 768)
-        #self.showMaximized()
-        # Principal
-        main_layout = QHBoxLayout(self)
-
-        # Navbar lateral
-        self.navbar = QListWidget()
-        #self.navbar.setIconSize(QSize(64, 64))  # Tamaño grande del icono
-        self.navbar.setFlow(QListWidget.TopToBottom)  # Icono arriba y texto abajo
-
-        item1 = QListWidgetItem()
-        item2 = QListWidgetItem()
-        item3 = QListWidgetItem()
-
-        item1.setTextAlignment(Qt.AlignCenter)
-        item2.setTextAlignment(Qt.AlignCenter)
-        item3.setTextAlignment(Qt.AlignCenter)
-
-        self.navbar.addItem(item1)
-        item1.setSizeHint(QSize(100, 100))
-        self.navbar.setItemWidget(item1, NavItem("./assets/home.svg", "Inicio"))
-        self.navbar.addItem(item2)
-        item2.setSizeHint(QSize(100, 100))
-        self.navbar.setItemWidget(item2, NavItem("./assets/map.svg", "Mapa Capturas"))
-        self.navbar.addItem(item3)
-        item3.setSizeHint(QSize(100, 100))
-        self.navbar.setItemWidget(item3, NavItem("./assets/map-marker.svg", "Mapa Arboles"))
-        self.navbar.setFixedWidth(100)
-        self.navbar.currentRowChanged.connect(self.switch_page)
-
-        # Contenedor central
-        self.stack = QStackedWidget()
-        # Contenido
-        self.page_home = Home(main_window=self)
-        self.page_map_images = MapCaptures(main_window=self)
-        self.page_map_trees= MapTreeScreen(main_window=self) #MapTrees()
-        self.page_map_trees= MapTreeScreen(main_window=self) #MapTrees()
-
-        self.stack.addWidget(self.page_home)
-        self.stack.addWidget(self.page_map_images)
-        self.stack.addWidget(self.page_map_trees)
-        # Agregar widgets al layout principal
-        main_layout.addWidget(self.navbar)
-        main_layout.addWidget(self.stack)
-        self.analysis_data_store = AnalysisData()
-        self.analysis_data_store = AnalysisData()
-        self.setLayout(main_layout)
-
-    def switch_page(self, index):
-        self.stack.setCurrentIndex(index)
-        self.navbar.setCurrentRow(index)
-        
-    def update_analysis_data(self, analysis_data_store):
-        self.analysis_data_store = analysis_data_store
-        self.page_map_images.update_map_view(self.analysis_data_store.images_data)
-        self.navbar.setCurrentRow(1)  # Cambiar al segundo ítem del navbar
-
-    def on_finish_configure(self):
-        #self.page_map_images.update_map_view()
-        self.navbar.setCurrentRow(1)  # Cambiar al segundo ítem del navbar
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

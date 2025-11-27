@@ -1,9 +1,11 @@
 from PySide6.QtWidgets import QApplication, QDialog, QStackedWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QFileDialog, QFrame, QListWidget, QProgressBar, QTableWidget, QScrollArea, QTableWidgetItem
 from PySide6.QtCore import Qt, Signal, QObject, Slot, QThread
 import os
+import numpy as np
 from core.utils import get_gps_coordinates, get_image_resolution, get_metadata, calcule_gsd_teorico, get_relative_altitude, get_gimbal_euler_angles
 import pandas as pd
 from multiprocessing import Pool
+from datetime import datetime
 
 class InitialConfigureScreen(QFrame):
     def __init__(self, parent = None, dialog_parent=None):
@@ -148,7 +150,7 @@ class MetadataWorker(QObject):
             "yaw_degree": yaw_degree,
             "pitch_degree": pitch_degree,
             "roll_degree": roll_degree,
-            "DateTimeOriginal": datetime,
+            "datetime_original": datetime,
             "image_width": image_width,
             "image_height": image_height,
             "gsd_horizontal": GSD_horizontal,
@@ -169,21 +171,77 @@ def read_metadata_worker(path):
         datetime = metadata.get("EXIF:DateTimeOriginal")
         basename = os.path.basename(path)
 
-        return {
-            "relative_path": path,
-            "name": basename,
-            "latitude": latitude,
-            "longitude": longitude,
-            "yaw_degree": yaw_degree,
-            "pitch_degree": pitch_degree,
-            "roll_degree": roll_degree,
-            "DateTimeOriginal": datetime,
-            "image_width": image_width,
-            "image_height": image_height,
-            "gsd_horizontal": GSD_horizontal,
-            "gsd_vertical": GSD_vertical,
-            "relative_altitude": relative_altitude
-        }
+        # Parse Dewarp Data e.g. "YYYY-mm-dd; fx,fy,cx,cy,k1,k2,p1,p2,k3"
+
+        dewarp = metadata.get('XMP:DewarpData', None)
+
+        fx=fy=cx=cy=k1=k2=p1=p2=k3=None
+        _, nums = dewarp.split(";", 1)
+        vals = [float(x.strip()) for x in nums.replace("\n", " ").split(",") if x.strip()!=""]
+        if len(vals) >= 9:
+            fx, fy, cx, cy, k1, k2, p1, p2, k3 = vals[:9]
+
+        # Vignetting coefficients k[0..5]
+        vign = metadata.get('XMP:VignettingData', None)
+        kpoly = None
+        if isinstance(vign, str):
+            kpoly = [float(x.strip()) for x in vign.split(",") if x.strip()!=""]
+            if len(kpoly) < 6:
+                kpoly = None
+
+        # Calibrated HMatrix: 9 numbers
+        hcal = metadata.get('XMP:CalibratedHMatrix', None)
+
+        H_cal = None
+        if isinstance(hcal, str):
+            hvals = [float(x.strip()) for x in hcal.split(",") if x.strip()!=""]
+            if len(hvals) == 9:
+                H_cal = np.array(hvals, dtype=np.float64).reshape(3,3).tolist()
+
+
+        h_dewarp = metadata.get('XMP:DewarpHMatrix', None)
+        H_d = None 
+        if isinstance(h_dewarp, str):
+            hvals = [float(x.strip()) for x in h_dewarp.split(",") if x.strip()!=""]
+            if len(hvals) == 9:
+                H_d = np.array(hvals, dtype=np.float64).reshape(3,3).tolist()
+
+        # Center for vignetting (designed optical center)
+        # Note: guide says CenterX, CenterY from Calibrated Optical Center X/Y
+        cx_design = metadata.get('XMP:CalibratedOpticalCenterX', 0.0)
+        cy_design = metadata.get('XMP:CalibratedOpticalCenterY', 0.0)
+
+        # Photometric fields
+        bits = int(metadata.get('EXIF:BitsPerSample', 16))
+        black = int(metadata.get('XMP:BlackLevel', 0))
+        gain  = float(metadata.get("XMP:SensorGain", 1.0))
+        exp_us  = float(metadata.get("XMP:ExposureTime", 10000))
+        pCam = float(metadata.get("XMP:SensorGainAdjustment", 1.0))
+        irradiance = float(metadata.get("XMP:Irradiance", 1.0))
+        band = str(metadata.get("XMP:BandName", "")).upper()
+        
+
+        return dict(
+        relative_path = path,
+        name = basename,
+        latitude = latitude,
+        longitude = longitude,
+        yaw_degree = yaw_degree,
+        pitch_degree = pitch_degree,
+        datetime_original = datetime,
+        roll_degree = roll_degree,
+        image_width = image_width,
+        image_height = image_height,
+        gsd_horizontal = GSD_horizontal,
+        gsd_vertical = GSD_vertical,
+        relative_altitude = relative_altitude,
+        bits=bits, black=black, gain=gain, exp_us=exp_us, pCam=pCam,
+        irradiance=irradiance, band=band,
+        kpoly=kpoly, cx_design=cx_design, cy_design=cy_design,
+        fx=fx, fy=fy, cx=cx, cy=cy, k1=k1, k2=k2, p1=p1, p2=p2, k3=k3,
+        H_cal=H_cal, H_dewarp=H_d
+    )
+
     except Exception as e:
         print(f"Error leyendo {path}: {e}")
         return None
@@ -414,7 +472,7 @@ class ImageSelectionScreen(QFrame):
             "yaw_degree": yaw_degree,
             "pitch_degree": pitch_degree,
             "roll_degree": roll_degree,
-            "DateTimeOriginal": datetime,
+            "datetime_original": datetime,
             "image_width": image_width,
             "image_height": image_height,
             "gsd_horizontal": GSD_horizontal,
@@ -516,7 +574,7 @@ class ImageDataTableScreen(QFrame):
             metadata["yaw_degree"],
             metadata["pitch_degree"],
             metadata["roll_degree"],
-            metadata["DateTimeOriginal"],
+            metadata["datetime_original"],
                 ] for metadata in images_data.values()]
 
         self.table.setRowCount(0)
@@ -553,10 +611,21 @@ class ImageDataTableScreen(QFrame):
         self.finished_configure.emit()
         ## Aqui guardar datos en json
         ## self.new_analysis_data_store.images_data
-        base_dir = self.dialog_parent.new_analysis_data_store.base_dir
-        images_data = self.dialog_parent.new_analysis_data_store.images_data
-        config = {"image_metatada": images_data}
-        self.save_configure_analysis(base_dir, config)
+        
+        #base_dir = self.dialog_parent.new_analysis_data_store.base_dir
+        #images_data = self.dialog_parent.new_analysis_data_store.images_data
+        #name = self.dialog_parent.new_analysis_data_store.name
+        
+        #config = {
+        #    "project_info": {
+        #        "name": name,
+        #        "creation_date": datetime.now().isoformat(),
+        #        "num_images": len(images_data),
+        #        "base_dir": base_dir
+        #    },
+        #    "image_metatada": images_data}
+        
+        #self.save_configure_analysis(base_dir, config)
 
         if isinstance(self.dialog_parent, QDialog):
             self.dialog_parent.accept()  
@@ -566,10 +635,10 @@ class ImageDataTableScreen(QFrame):
     def save_configure_analysis(self, base_dir, data):
         import json
         with open(f"{base_dir}/config.json", "w") as f:
-            json.dump(data, f)    
+            json.dump(data, f, indent=4)    
 
 class AnalysisData:
-    def __init__(self, base_dir = None, name = None, images_data = None):
+    def __init__(self, base_dir = ".", name = None, images_data = None):
         self.images_data = images_data
         self.base_dir = base_dir
         self.name = name

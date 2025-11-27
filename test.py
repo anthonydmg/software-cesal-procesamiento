@@ -1,25 +1,38 @@
 from core.inference import TreeDetectorYolo
 from core.processing import ImageSticher
 import pandas as pd
+import json
 
 if __name__ == "__main__":
-
-    df_images = pd.read_csv("./df_images_metadata.csv")
-    df_images_slice = df_images.iloc[:50,:]
-    print(df_images_slice)
+    dir_analsis = "./analisis/prueba-biochumbi-150-oct-test"
+    with open(f"{dir_analsis}/config.json", "r") as f:
+        config = json.load(f)
     
-    images_path = df_images_slice['relative_path'].to_list()
-    detector = TreeDetectorYolo().get_instance()
-    predictions = detector.predict(images_path, save_dir = "./results")
 
-    assert len(predictions) == len(df_images_slice), "El numero de predicciones deber ser igual a la cantidad de imaganes"
+    name = config["project_info"]['name']
+    print("name:", name)
+    images_data = config['image_metatada']
+    images_data_list = list(images_data.values())
 
-    df_images_data = pd.concat([df_images_slice, pd.DataFrame(predictions)], axis=1)
-    print("df_images_data:", df_images_data.head())
+    print("Numero de Imagenes Orignales:", len(images_data_list))
+    
+    metadata_rgb_files = [img_m for img_m in images_data_list if "_D.JPG" in img_m['relative_path']]
+    print("Numero de Imagenes RGB:", len(metadata_rgb_files))
+    # Filtramos que no son perpendiculares
+    metadata_rgb_files = [ im_data for im_data in metadata_rgb_files if im_data["pitch_degree"] < -89 and im_data['pitch_degree'] > -91]
+                
+    for row in metadata_rgb_files:
+        row["detections_path"] = f"{dir_analsis}/results/detections/{row['name'][:-4]}_DETECTIONS.json"
+        
+    print("Numero de Imagenes Perpendiculares:", len(metadata_rgb_files))
+    total = len(metadata_rgb_files)
+    processed = 0
+    batch_results = {}
+    
+    metadata_rgb_files = metadata_rgb_files[:30]
 
-    df_images_data.to_csv("./df_images_data.csv", index = False)
-    #generate_mosaic(df_images.to_dict(orient='index'), type_align_matrix = "affine", signal_progress = None)
-    image_sticher = ImageSticher(images_data= df_images_data.to_dict(orient='index'))
 
-    image_sticher.run(save_dir = "./mosaic", 
-                      prefix_name="Vuelo-Agosto-16-Campo2-Accopampa")
+    image_sticher = ImageSticher(images_data = metadata_rgb_files, 
+                                 result_dir=f"{dir_analsis}")
+    
+    image_sticher.run(prefix_name=name)

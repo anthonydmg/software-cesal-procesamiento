@@ -1,7 +1,7 @@
-from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QGroupBox, QLabel, QGraphicsScene, QGraphicsView, QGraphicsPixmapItem, QToolButton, QFrame, QPushButton
+from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QGroupBox, QLabel, QGraphicsScene, QGraphicsView, QGraphicsPixmapItem, QToolButton, QFrame, QPushButton, QFileDialog, QRadioButton
 from PySide6.QtGui import QPalette, QColor, QPainter, QPixmap, QImage, QIcon
 from PySide6.QtGui import QFont
-from PySide6.QtCore import Qt, QRectF
+from PySide6.QtCore import Qt, QRectF, Signal, QPoint
 import re
 import os
 from osgeo import gdal
@@ -10,8 +10,12 @@ from tempfile import mkstemp
 import folium
 from PySide6.QtWebEngineWidgets import QWebEngineView
 import json
+from datetime import datetime
+
+from core.report_generator import ReportGenerator
 
 class GeoTIFFViewer(QWidget):
+    layer_selected = Signal(str)
     def __init__(self, mosaic_dir, masks_dirs  = None, parent=None):
         super().__init__(parent)
         self.mosaic_dir = mosaic_dir
@@ -120,6 +124,48 @@ class GeoTIFFViewer(QWidget):
             }
         """)
 
+        ## # ---------- MENÚ FLOTANTE CAPAS ----------
+
+        self.layers_menu = QFrame(self)
+        self.layers_menu.setFrameShape(QFrame.StyledPanel)
+        self.layers_menu.setStyleSheet("""
+            QFrame {
+                background-color: white;
+                border-radius: 8px;
+                border: 1px solid #ccc;
+            }
+            QRadioButton {
+                    background-color: transparent;
+                    color: black;
+            }
+        """)
+
+        self.layers_menu.setFixedSize(200, 120)
+        self.layers_menu.hide()  # Oculto por defecto
+
+        layout_layers = QVBoxLayout(self.layers_menu)
+
+        self.rb_ndvi = QRadioButton("NDVI")
+        self.rb_mapa = QRadioButton("MAPA")
+        self.rb_def = QRadioButton("MAPA DE DEFICIENCIAS")
+        #self.rb_ndvi.setStyleSheet("""
+        #        QRadioButton {
+        #            background-color: transparent;
+        #            color: black;
+        #        }
+        #    """)
+        # Por defecto MAPA seleccionado
+        self.rb_mapa.setChecked(True)
+        
+        layout_layers.addWidget(self.rb_ndvi)
+        layout_layers.addWidget(self.rb_mapa)
+        layout_layers.addWidget(self.rb_def)
+
+
+        # Conectar cambios de radio
+        self.rb_ndvi.toggled.connect(lambda: self.on_layer_selected("ndvi"))
+        self.rb_mapa.toggled.connect(lambda: self.on_layer_selected("rgb"))
+        self.rb_def.toggled.connect(lambda: self.on_layer_selected("map_deficiencies"))
         # Iconos simples
         #self.zoom_in_btn.setText("+")
         #self.zoom_out_btn.setText("-")
@@ -127,7 +173,8 @@ class GeoTIFFViewer(QWidget):
         self.zoom_in_btn.setToolTip("Zoom In")
         self.zoom_out_btn.setToolTip("Zoom Out")
        
-
+        # Acción del botón de layers
+        self.layers_btn.clicked.connect(self.toggle_layers_menu)
         #self.layout.addWidget(toolbar_container)
         # Añadir vista al layout
         self.layout.addWidget(self.view)
@@ -141,12 +188,32 @@ class GeoTIFFViewer(QWidget):
         self.zoom_in_btn.raise_()
         self.zoom_out_btn.raise_()
         self.layers_btn.raise_()
+        self.layers_menu.raise_()
 
     def zoom_in(self):
         self.view.scale(self.zoom_factor, self.zoom_factor)
 
     def zoom_out(self):
         self.view.scale(1 / self.zoom_factor, 1 / self.zoom_factor)
+
+    def on_selected_layer(self, option):
+        self.layer_selected.emit(option)
+
+    def toggle_layers_menu(self):
+        print("Load menu toggle")
+        if self.layers_menu.isVisible():
+            self.layers_menu.hide()
+        else:
+            # Obtener posición del botón dentro del widget principal
+            pos = self.layers_btn.mapToParent(QPoint(0, 0))
+            
+            x = pos.x() + self.layers_btn.width() + 10
+            y = pos.y()
+
+            print("Menu pos:", x, y)
+
+            self.layers_menu.move(x, y)
+            self.layers_menu.show()
 
     def load_layers(self):
         """Carga ambas capas (mosaico y máscara)"""
@@ -273,6 +340,23 @@ class GeoTIFFViewer(QWidget):
         self.layers_btn.move(30, self.zoom_in_btn.y() - self.layers_btn.height() - spacing)
         self.view.fitInView(self.scene.itemsBoundingRect(), Qt.KeepAspectRatio)
 
+    def update_layers(self,  mosaic_dir=None, masks_dirs=None):
+        """
+        Actualiza las capas cargadas en el viewer.
+        mosaic_dir: nueva ruta del mosaico
+        masks_dirs: nuevas rutas de máscaras (lista)
+        """
+        if mosaic_dir:
+            self.mosaic_dir = mosaic_dir
+        if masks_dirs is not None:
+            self.masks_dirs = masks_dirs
+
+        # Limpiar escena anterior
+        self.scene.clear()
+
+        # Volver a cargar con las nuevas rutas
+        self.load_layers()
+
 class LegendItem(QWidget):
     def __init__(self, color, label_text, parent = None):
         super().__init__(parent)
@@ -333,7 +417,7 @@ class LegendWidget(QWidget):
             ("#00B6FF", "Exceso Nutricional")
         ]
         
-        with open("./mosaicos/output_layers/leyend_colors.json", "r") as f:
+        with open("./mosaicos/output_layers/leyend_colors_2.json", "r") as f:
             leyend_colors = json.load(f)
             print("leyend_colors:", leyend_colors)
             
@@ -355,7 +439,6 @@ class MosaicView(QWidget):
         self.setup_ui()
         
         # Debug: Mostrar información de carga
-    
     def setup_ui(self):
         """Configura la interfaz de usuario"""
 
@@ -366,12 +449,16 @@ class MosaicView(QWidget):
         self.viewer = GeoTIFFViewer(
             mosaic_dir="./mosaicos/output_layers/tiles_mosaic_map_layer",
             masks_dirs = [
-                "./mosaicos/output_layers/tiles_nutritional_all_status"
+                "./mosaicos/output_layers/tiles_nutritional_N_status"
                 ],
             parent=self
         )
         
         layout.addWidget(self.viewer)
+    
+    def update_layers(self, mosaic_dir=None, masks_dirs=None):
+        self.viewer.update_layers(mosaic_dir, masks_dirs)
+
 
 class TitleResults(QWidget):
     def __init__(self, name_analysis):
@@ -387,14 +474,15 @@ class TitleResults(QWidget):
         container_layout.setSpacing(0)  # Sin espacios
 
         # Título principal
-        name_analysis_title = QLabel(name_analysis)
-        name_analysis_title.setStyleSheet("""
+        self.name_analysis_title = QLabel(name_analysis)
+        self.name_analysis_title.setWordWrap(True)
+        self.name_analysis_title.setStyleSheet("""
             color: #05893A;
             padding: 5px 10px;
             font-size: 15px;
             font-weight: bold;
         """)
-        name_analysis_title.setAlignment(Qt.AlignLeft)
+        self.name_analysis_title.setAlignment(Qt.AlignLeft)
 
         # Subtítulo
         subtitle = QLabel("Resultados del Análisis")
@@ -406,7 +494,7 @@ class TitleResults(QWidget):
         """)
 
         # Añadir widgets al contenedor
-        container_layout.addWidget(name_analysis_title)
+        container_layout.addWidget(self.name_analysis_title)
         container_layout.addWidget(subtitle)
 
         # Layout principal
@@ -415,6 +503,8 @@ class TitleResults(QWidget):
         main_layout.setSpacing(0)
         main_layout.addWidget(container)
 
+    def update_title(self, title):
+        self.name_analysis_title.setText(title)
 
 class DiagramWidget(QWidget):
     def __init__(self, title, image_path):
@@ -454,9 +544,11 @@ class DiagramWidget(QWidget):
         self.setLayout(layout)
 
 class RightPanelResults(QWidget):
-    def __init__(self, name_analysis, diagram_path):
+    def __init__(self, name_analysis, diagram_path, main_window):
         super().__init__()
 
+        self.main_window = main_window
+        
         container = QWidget()
         container_layout = QVBoxLayout()
         container_layout.setContentsMargins(0, 0, 0, 0)  # sin márgenes laterales
@@ -465,8 +557,8 @@ class RightPanelResults(QWidget):
         # Espaciador arriba (por ejemplo, 20px)
         container_layout.addSpacing(30)
 
-        title_results = TitleResults(name_analysis)
-        container_layout.addWidget(title_results)
+        self.title_results = TitleResults(name_analysis)
+        container_layout.addWidget(self.title_results)
 
         ## Diagrama
         diagram_widget = DiagramWidget("Distribucion de  arboles con deficiencias nutricionales", diagram_path)
@@ -475,6 +567,8 @@ class RightPanelResults(QWidget):
         container_layout.addWidget(legend_widget)
         report_button = QPushButton("  Generar Reporte")
         report_button.setIcon(QIcon("./assets/file.svg"))
+
+        report_button.clicked.connect(self.generate_report)
         
         report_button.setStyleSheet("""
             QPushButton {
@@ -522,15 +616,52 @@ class RightPanelResults(QWidget):
         container.setLayout(container_layout)
 
         layout = QVBoxLayout()
-        layout.addWidget(container)
+        layout.addWidget(container, 0, Qt.AlignTop)
         self.setLayout(layout)
 
+    def update_title(self, title):
+        self.title_results.update_title(title)
+    
+    def showEvent(self, event):
+        super().showEvent(event)
+        name = self.main_window.analysis_data_store.name
+
+        print("name:", name)
+
+        if name is None:
+            name =  "Análisis Ejemplo 1"
+        self.update_title(name)
+
+    def generate_report(self):
+        date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base_dir = self.analysis_data_store.base_dir
+        print("base_dir:", base_dir)
+        pdf_file = f"{base_dir}/RESULTADOS_{date_str}.pdf"
+        
+        report_generator = ReportGenerator()
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Guardar archivo PDF",
+            pdf_file,
+            "Archivos PDF (*.pdf)"
+        )
+        print("Path:", path)
+
+        report_generator.create_report(path)
+        
+
 class MapTreeScreen(QWidget):
+    layers_ready = Signal(str, dict)
+    layer_mode = Signal(str)
+
     def __init__(self, main_window):
         super().__init__()
         self.main_window = main_window
+        self.current_layer = "RGB"
+        self.layers_path = dict()
         self.setup_ui()
-    
+
     def setup_ui(self):
         outer_layout = QVBoxLayout(self)
         outer_layout.setAlignment(Qt.AlignCenter)  # Centra el contenedor completo
@@ -540,32 +671,45 @@ class MapTreeScreen(QWidget):
         inner_layout.setContentsMargins(0, 0, 0, 0)
         inner_layout.setSpacing(0)  # Espacio fijo entre mapa y leyenda
         
-        
-        #self.setLayout(layout)
+        self.layers_ready.connect(
+            self.set_layers#lambda mosaic, layers: self.mosaic_view.update_layers(mosaic, layers)
+        )
+
         self.mosaic_view = MosaicView(self.main_window)
-    
         
-        right_panel = RightPanelResults(name_analysis = "Análisis Ejemplo 1", 
-                                        diagram_path = "./assets/diagram.png")
+        self.mosaic_view.viewer.layer_selected.connect(self.update_mosaic)
+        #self.analysis_data_store = self.main_window.analysis_data_store
+
+        self.right_panel = RightPanelResults(name_analysis = "Análisis Ejemplo 1", 
+                                        diagram_path = "./assets/diagram2.png",
+                                        main_window = self.main_window)
         
-        right_panel.setMaximumWidth(350)
+        self.right_panel.setMaximumWidth(350)
 
         inner_layout.addWidget(self.mosaic_view, stretch=4)
-        inner_layout.addWidget(right_panel, stretch=1)
-        #title_section_widget = QLabel("Análisis de salud del cultivo")
-        #font = QFont()
-        #font.setPointSize(18)  # Ajusta el tamaño según tu diseño en Figma
-        #font.setBold(True)
-        #title_section_widget.setFont(font)
-        #title_section_widget.setStyleSheet("padding-left: 15px;")
-        #outer_layout.addWidget(title_section_widget)
-        outer_layout.addWidget(inner_widget)    
-        #layout.addWidget(self.mosaic_view, stretch=4)
-        #layout.addSpacing(10)
-        #layout.addWidget(self.legend_widget, stretch=1)
-        #label = QLabel()
+        inner_layout.addWidget(self.right_panel, stretch=1)
+        outer_layout.addWidget(inner_widget)   
 
+    def update_mosaic(self, current_layer):
+        if current_layer == "rgb":
+            mosaic_path = f"{self.layers_path[current_layer]}/tiles"
+            self.mosaic_view.update_layers(mosaic_path, None)
+        elif current_layer == "ndvi":
+            mosaic_path = f"{self.layers_path[current_layer]}/tiles"
+            self.mosaic_view.update_layers(mosaic_path, None)
+        elif current_layer == "map_deficiencies":
+            mosaic_path = f'{self.layers_path["rgb"]}/tiles'
+            deficientes_mask = f'{self.layers_path["map_deficiencies"]}/tiles'
+            self.mosaic_view.update_layers(mosaic_path, [deficientes_mask])
+        else:
+            mosaic_path = f"{self.layers_path[current_layer]}/tiles"
+            self.mosaic_view.update_layers(mosaic_path, None)
 
+    def set_layers(self, mosaic, layers):
+        self.layers_path = layers
+        self.update_mosaic(self.current_layer)
+    
+ 
 class MapTrees(QWidget):
     def __init__(self):
         super().__init__()

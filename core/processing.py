@@ -17,7 +17,8 @@ import numpy as np
 from tqdm import tqdm
 from scipy.sparse.linalg import lsqr
 from datetime import datetime
-
+import pandas as pd
+import json
 
 class FusionMethod(Enum):
     SIMPLE_AVERAGE = 1
@@ -26,6 +27,10 @@ class FusionMethod(Enum):
     EXPOSURE_COMPENSATED = 4
     MULTIBAND_ADAPTIVE = 5
     ROBUST_DRONE = 6
+
+MIN_MATCHES_FOR_EDGE = 30
+
+RANSAC_THRESH  = 4.0
 
 class Camara_M3M:
     fx = fy = 3713.29  # Distancia focal en píxeles
@@ -214,9 +219,13 @@ def direct_project_image_to_dom(image, H, dom_size, terrain_points_dom):
             (int(dom_size[1]), int(dom_size[0])),
             flags=cv2.INTER_LANCZOS4  # Interpolación de alta calidad
         )
+
+        gray = cv2.cvtColor(imagen_proyectada, cv2.COLOR_BGR2GRAY)
+
+        mask = np.where(gray > 0, 255, 0).astype(np.float32)
         # Crear mascara
-        mask = np.zeros((dom_size[0], dom_size[1]), dtype=np.float32)  # Invertir tamaño para (height, width)
-        cv2.fillConvexPoly(mask, terrain_points_dom.astype(np.int32), 1)
+        #mask = np.zeros((dom_size[0], dom_size[1]), dtype=np.float32)  # Invertir tamaño para (height, width)
+        #cv2.fillConvexPoly(mask, terrain_points_dom.astype(np.int32), 1)
         
         return imagen_proyectada, mask
 
@@ -227,16 +236,16 @@ def apply_clahe(img, clip_limit=2.0, grid_size=(8, 8)):
     clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=grid_size)
     return clahe.apply(img)
 
-def detect_keypoint_descriptors(img, detector_type="ORB", draw_keypoints = False):
+def detect_keypoint_descriptors(img, detector_type="ORB", draw_keypoints = False, nfeatures = 10000):
     start_time = time.time()
 
     im_gray = apply_clahe(img)
     if detector_type == "ORB":
-        detector = cv2.ORB_create(nfeatures=10000, edgeThreshold=15, patchSize=31)
+        detector = cv2.ORB_create(nfeatures=nfeatures, edgeThreshold=15, patchSize=31)
     elif detector_type == "AKZE":
         detector = cv2.AKAZE_create(threshold=0.0005)
     elif detector_type == "SIFT":
-        detector = cv2.SIFT_create(nfeatures=10000, contrastThreshold=0.02, edgeThreshold=15)
+        detector = cv2.SIFT_create(nfeatures=nfeatures, contrastThreshold=0.02, edgeThreshold=15)
     kp, desc = detector.detectAndCompute(im_gray, None)
     ## Codigp para visualizar los keypoints detectados
     if draw_keypoints:
@@ -283,7 +292,7 @@ def detect_keypoint_descriptors_in_dom(img_dom, corners_img, detector_type = "OR
 
     return kp_img_dom, desc_img, elapsed_time
 
-def process_detect_keypoint_descriptors_in_dom(images_data, dom_size):
+def process_detect_keypoint_descriptors_in_dom(images_data, dom_size, detector_keypoint = "SIFT"):
     for im_data in tqdm(images_data,"keypoints Detection:"):
         im_path = im_data['relative_im_path']
         H_rtk = im_data['H_rtk']
@@ -291,7 +300,7 @@ def process_detect_keypoint_descriptors_in_dom(images_data, dom_size):
         img = cv2.imread(im_path)
         img_undistorned = distortion_correction(img)
         imagen_proyectada, _ = direct_project_image_to_dom(img_undistorned, H_rtk, dom_size, terrain_points_dom)
-        kp, desc, _ = detect_keypoint_descriptors_in_dom(imagen_proyectada, terrain_points_dom, detector_type = "ORB", draw_keypoints = False)
+        kp, desc, _ = detect_keypoint_descriptors_in_dom(imagen_proyectada, terrain_points_dom, detector_type = detector_keypoint, draw_keypoints = False)
         im_data['kp_img_dom'] = kp
         im_data['desc_img_dom'] = desc
     return images_data
@@ -446,6 +455,55 @@ def estimate_translation_ransac(src_pts, dst_pts, max_iters=1000, threshold=1.0)
     M[0,2], M[1,2] = best_tx, best_ty
     return M, best_inliers
 
+def estimate_pairwase_homographies(overlap_graph, all_images_data, transform_type = "homography", ransac_thresh = RANSAC_THRESH, min_matches_per_edges = MIN_MATCHES_FOR_EDGE):
+    edges = []
+    n = len(all_images_data)
+    for i, neighboards in tqdm(overlap_graph.items(),"Pairwase Edges"):
+        neighboards_ids = [neigh[0] for neigh in neighboards]
+        for j in range(i+1, n):
+            if j not in neighboards_ids:
+                continue
+            desc_i = all_images_data[i]['desc_img_dom']
+            kp_img_dom_i = all_images_data[i]['kp_img_dom']
+            #print("kp_img_dom_i", kp_img_dom_i)
+            desc_j = all_images_data[j]['desc_img_dom']
+            kp_img_dom_j = all_images_data[j]['kp_img_dom']
+            good_matches = match_keypoints_with_flann(desc_i, desc_j, detector_type="SIFT")
+
+            if len(good_matches) < 8:
+                 continue
+            
+            pts_i = np.array([kp_img_dom_i[m.queryIdx].pt for m in good_matches], dtype=np.float32)
+            pts_j = np.array([kp_img_dom_j[m.trainIdx].pt for m in good_matches], dtype=np.float32)
+            
+            if transform_type == 'homography': # 8 grados de libertad
+                H, mask = cv2.findHomography(pts_j, pts_i, cv2.RANSAC, ransac_thresh)
+            elif transform_type == 'similarity': # 4 grados de libertad
+                H, mask = cv2.estimateAffinePartial2D(pts_j, pts_i, method=cv2.RANSAC, ransacReprojThreshold= RANSAC_THRESH)
+                H = np.vstack([H, [0, 0, 1]])
+            elif transform_type == 'affine':    # 6 grados de libertad
+                H, mask = cv2.estimateAffine2D(pts_j, pts_i, method=cv2.RANSAC, ransacReprojThreshold= RANSAC_THRESH)
+                if H is None or H.shape != (2, 3):
+                    print(f"⚠️ Transformación inválida entre imágenes {i} y {j}, se salta")
+                    continue
+                    #H = np.eye(3, dtype=np.float32) 
+                H = np.vstack([H, [0, 0, 1]])
+            else:
+                H, mask = cv2.findHomography(pts_j, pts_i, cv2.RANSAC, RANSAC_THRESH) 
+            
+            if H is None:
+                 continue
+            
+            mask = mask.ravel().astype(bool)
+            #print("Mask:", mask)
+            inliers = mask.sum()
+            print(f"inliers ({i}, {j}):", inliers)
+
+            if inliers >= min_matches_per_edges:  # Mínimo para estimar transformación
+                edges.append((i, j, H, mask, inliers, pts_i, pts_j))
+    
+    return edges
+
 def estimate_pairwise_transforms(all_images_data, matches, transform_type='similarity'):
     """Estima transformaciones entre pares de imágenes"""
     transforms = {}
@@ -585,6 +643,45 @@ def save_as_geotiff(image, filename, origin_x, origin_y, resolution, ref_zone_lo
     out_ds.FlushCache()
     out_ds = None  # Cerrar el archivo
 
+def build_adjacency_graph_from_edges(n, edges):
+    """Construye lista de adyacencia con peso = -num_inliers (queremos MST con mayor inliers)."""
+    adj_graph = { i: [] for i in range(n)}
+    for (i,j,H,mask,inliers,pts_i,pts_j) in edges:
+        w = -inliers
+        adj_graph[i].append((j, w, H, mask, pts_i, pts_j))
+        adj_graph[j].append((i, w, np.linalg.inv(H), mask, pts_j, pts_i))
+    return adj_graph
+
+def prim_mst(n, adj_graph):
+    """
+    Prim simple que retorna aristas del MST en forma (u,v,H_uv,mask,pts_u,pts_v).
+    Es el camino a recoorrer en la propagacion de correciones.
+    """
+
+    visited = [False] * n
+    visited[0] = True
+    mst_edges = []
+    
+    import heapq
+    heap = []
+
+    for (v, w, H, mask, pts_u, pts_v) in adj_graph[0]:
+        heapq.heappush(heap, (w, 0, v, H, mask, pts_u, pts_v))
+    
+    while heap:
+        w,u,v,H,mask,pts_u,pts_v = heapq.heappop(heap)
+        if visited[v]:
+            continue
+
+        visited[v] = True
+        mst_edges.append((u,v, H, mask, pts_u, pts_v))
+
+        for (to, w2, H2, mask2, pts_a, pts_b) in adj_graph[v]:
+            if not visited[to]:
+                heapq.heappush(heap, (w2, v, to, H2, mask2, pts_a, pts_b))
+    
+    return mst_edges
+
 def build_lineal_system(all_images_data, inliers, scale_factor):
     # Inicialización de listas para COO
     weight = 5
@@ -698,8 +795,40 @@ def create_mosaic(all_images_data, global_transforms, dom_shape):
     
     return final_dom
 
-def generate_mosaic(all_images_data, type_align_matrix = "affine", signal_progress = None):
+def initialize_homographies(n, mst_edges):
+    """Inicializa H_i con H_root = I, propaga por MST."""
+    H_abs = [None] * n
+    H_abs[0] = np.eye(3)
+
+    # Construir lista de hijos por propagacion
+    added = {0}
+    adj_map = {}
+    
+    for (u,v,H,mask,pts_u,pts_v) in mst_edges:
+        adj_map.setdefault(u, []).append((v,H))
+        adj_map.setdefault(v, []).append((u, np.linalg.inv(H)))
+
+    # BFS propagation
+    queue = [0]
+    while queue:
+        u = queue.pop(0)
+        for (v, H_uv) in adj_map.get(u, []):
+            if H_abs[v] is None:
+                H_abs[v] = H_abs[u].dot(H_uv)
+                queue.append(v)
+
+    
+    # For any disconnected images, set identity
+    for i in range(n):
+        if H_abs[i] is None:
+            print("Desconectado:", i)
+            H_abs[i] = np.eye(3)
+
+    return H_abs
+
+def generate_mosaic(all_images_data, type_align_matrix = "affine", detector_keypoint = "SIFT", signal_progress = None):
     all_images_data_list = list(all_images_data.values())
+    n_images = len(all_images_data)
     print("Comienza process_calculate_camera_pose")
     all_images_data_list = process_calculate_camera_pose(all_images_data_list)
     if signal_progress is not None:
@@ -723,36 +852,64 @@ def generate_mosaic(all_images_data, type_align_matrix = "affine", signal_progre
     if signal_progress is not None:
         signal_progress.emit(70)
     print("Comienza process_detect_keypoint_descriptors_in_dom")
-    all_images_data_list = process_detect_keypoint_descriptors_in_dom(all_images_data_list, dom_size)
+
+    all_images_data_list = process_detect_keypoint_descriptors_in_dom(all_images_data_list, dom_size, detector_keypoint)
+    
     if signal_progress is not None:
         signal_progress.emit(75)
+    
     print("Comienza propagate_pairwise_correction")
-    matches = calculate_pairwase_matches(all_images_data_list)
-    transforms, inliers = estimate_pairwise_transforms(all_images_data_list, matches, transform_type='affine')
-    scale_factor = 1.0 / dom_size[0]
-    A, b = build_lineal_system(all_images_data, inliers, scale_factor = scale_factor)
-    global_transforms = solve_global_transforms(A.tocsr(), b, len(all_images_data), scale_factor = scale_factor)
-    print("global_transforms:", global_transforms)
-    if signal_progress is not None:
-        signal_progress.emit(85)
-    print("Comienza transformations")
+    all_terrain_points_dom = [d['terrain_points_dom'] for d in all_images_data_list]
+
+    # 2. Construir grafo de solapamiento
+    overlap_graph  = build_overlap_graph(all_terrain_points_dom, min_overlap=0.45)
+    # 5) Grafo y MST (Prim). Ruta de propacion
+    edges = estimate_pairwase_homographies(overlap_graph, all_images_data_list, type_align_matrix)
+
+    adj_graph = build_adjacency_graph_from_edges(n_images, edges)
+
+    mst = prim_mst(n_images, adj_graph)
+    # 6) Inicialización H absolute vía propagación en MST
+    #H_abs = initialize_homographies(n, mst)
+    #matches = calculate_pairwase_matches(all_images_data_list)
+    #transforms, inliers = estimate_pairwise_transforms(all_images_data_list, matches, transform_type='affine')
+    #scale_factor = 1.0 / dom_size[0]
+    #A, b = build_lineal_system(all_images_data, inliers, scale_factor = scale_factor)
+    #global_transforms = solve_global_transforms(A.tocsr(), b, len(all_images_data), scale_factor = scale_factor)
+    #print("global_transforms:", global_transforms)
+    #if signal_progress is not None:
+    #    signal_progress.emit(85)
+    #print("Comienza transformations")
     #print("Comienza propagate_pairwise_correction")
     
-    final_dom = create_mosaic(all_images_data, global_transforms, dom_shape = (height_px, width_px))
-    ref_zone_lon = all_images_data[0]['longitude']
-    save_as_geotiff(
-            final_dom, f"campo2_mosaico_graph_queue_refine_{type_align_matrix}_{len(all_images_data)}_images.tif", 
-            dom_bounds[0], dom_bounds[3],  # Esquina superior izquierda (X,Y)
-            dom_resolution,
-            ref_zone_lon
-        )
+    #final_dom = create_mosaic(all_images_data, global_transforms, dom_shape = (height_px, width_px))
+    #ref_zone_lon = all_images_data[0]['longitude']
+    #save_as_geotiff(
+    #        final_dom, f"campo2_mosaico_graph_queue_refine_{type_align_matrix}_{len(all_images_data)}_images.tif", 
+    #        dom_bounds[0], dom_bounds[3],  # Esquina superior izquierda (X,Y)
+    #        dom_resolution,
+    #        ref_zone_lon
+    #    )
     if signal_progress is not None:
         signal_progress.emit(100)
 
+def crop_valid_region(img, mask, tree_mask):
+    ys, xs = np.where(mask > 0)
+    y_min, y_max = ys.min(), ys.max()
+    x_min, x_max = xs.min(), xs.max()
+    cropped_img = img[y_min:y_max+1, x_min:x_max+1]
+    cropped_mask = mask[y_min:y_max+1, x_min:x_max+1]
+    cropped_tree_mask = tree_mask[y_min:y_max+1, x_min:x_max+1]
+    corner = (x_min, y_min)
+    return cropped_img, cropped_mask, cropped_tree_mask, corner
+
 class ImageSticher():
-    def __init__(self, images_data, on_progress_change = None):
+    def __init__(self, images_data, on_progress_change = None, on_cancel = None, result_dir = "./"):
         self.images_data = images_data
         self.on_progress_change = on_progress_change
+        self.result_dir = result_dir
+        self.is_running = True
+        self.on_cancel = on_cancel
     
     def process_calculate_camera_pose(self, images_data):
         for im_data in images_data:
@@ -762,9 +919,20 @@ class ImageSticher():
     def process_terrain_points(self, images_data):
         for im_data in images_data:
             im_data['terrain_points'] = corners_to_terrain_points(im_data)
+            if not self.check_continue_procress():
+                return
         return images_data
+    
+    def stop(self):
+        self.is_running = False
+    
+    def check_continue_procress(self):
+        if not self.is_running:
+            self.on_cancel()
+            return False
+        return True
 
-    def estimate_dom_parameters(self, images_data, margin_extension = 0.1, target_resolution = None, scale_factor = 5.1):
+    def estimate_dom_parameters(self, images_data, margin_extension = 0.1, target_resolution = None, scale_factor = 4.1):
         min_gsd = np.min([m['gsd_horizontal'] for m in images_data])
         print("min_gsd:", min_gsd)
         
@@ -795,7 +963,7 @@ class ImageSticher():
 
         return images_data
 
-    def process_detect_keypoint_descriptors_in_dom(self, images_data, dom_size):
+    def process_detect_keypoint_descriptors_in_dom(self, images_data, dom_size, detector_keypoint = "SIFT"):
         for i, im_data in enumerate(tqdm(images_data, desc="Keypoints Detection")):
             #print("im_data:", im_data)
             im_path = im_data['relative_path']
@@ -804,17 +972,20 @@ class ImageSticher():
             img = cv2.imread(im_path)
             img_undistorned = distortion_correction(img)
             imagen_proyectada, _ = direct_project_image_to_dom(img_undistorned, H_rtk, dom_size, terrain_points_dom)
-            kp, desc, _ = detect_keypoint_descriptors_in_dom(imagen_proyectada, terrain_points_dom, detector_type = "ORB", draw_keypoints = False)
+            kp, desc, _ = detect_keypoint_descriptors_in_dom(imagen_proyectada, terrain_points_dom, detector_type = detector_keypoint, draw_keypoints = False)
             im_data['kp_img_dom'] = kp
             im_data['desc_img_dom'] = desc
             self.progress_update(8 + ((i * 20)// len(images_data)))
+
+            if not self.check_continue_procress():
+                return
         return images_data
     
     def calculate_pairwase_matches(self, all_images_data):
         all_terrain_points_dom = [im_data['terrain_points_dom'] for im_data in all_images_data]
         overlap_graph  = build_overlap_graph(all_terrain_points_dom, min_overlap=0.45)
         matches =  {}
-        for i, nbrs in tqdm(overlap_graph.items(), desc= "Image"):
+        for i, nbrs in tqdm(overlap_graph.items(), desc= "Matches"):
             for j, _ in nbrs:
                 desc_i = all_images_data[i]['desc_img_dom']
                 #kp_img_dom_i = all_images_data[i]['kp_img_dom']
@@ -824,12 +995,14 @@ class ImageSticher():
                 if len(good_matches) >= 4:  # Mínimo para estimar transformación
                         matches[(i, j)] = good_matches
             self.progress_update(20 + ((i * 30)// len(all_images_data)))
-        
+            
+            if not self.check_continue_procress():
+                return
         return matches
-    
+
     def build_linear_system(self, all_images_data, inliers, scale_factor):
     # Inicialización de listas para COO
-        weight = 10
+        weight = 20
         row_data = []
         row_indices = []
         col_indices = []
@@ -861,6 +1034,24 @@ class ImageSticher():
             b_list.append(0)
             row_counter += 1
 
+
+        # 3. Restricciones de regularización de traslaciones
+        translation_weight = 0.1  # puedes ajustar este valor
+
+        for i in range(n):
+            # Penalizar traslación X cerca de 0
+            row_data.append(translation_weight)
+            row_indices.append(row_counter)
+            col_indices.append(6 * i + 2)  # tx
+            b_list.append(0)
+            row_counter += 1
+
+            # Penalizar traslación Y cerca de 0
+            row_data.append(translation_weight)
+            row_indices.append(row_counter)
+            col_indices.append(6 * i + 5)  # ty
+            b_list.append(0)
+            row_counter += 1
 
         # 4. Restricciones de reproyección
         for (i, j), match_list in tqdm(inliers.items(), desc="Matches"):
@@ -912,7 +1103,6 @@ class ImageSticher():
         return global_transforms
 
     def seg_pts_transform(self, segs, H):
-        print("segs:", segs)
         print("len(segs):", len(segs))
         segs_warped = []
         for poly in segs:
@@ -922,6 +1112,114 @@ class ImageSticher():
             segs_warped.append(pts_warped)
         return segs_warped
 
+    def centroide_poligono(self, polygon):
+        """
+        polygon: np.array de shape (N,2) con vértices (x,y).
+        """
+        M = cv2.moments(np.array(polygon, dtype=np.int32))
+        if M["m00"] == 0:
+            # Si área = 0 (ej. polígono degenerado), devolvemos promedio de puntos
+            cx, cy = polygon[:,0].mean(), polygon[:,1].mean()
+        else:
+            cx = M["m10"] / M["m00"]
+            cy = M["m01"] / M["m00"]
+        return np.array([cx, cy])
+
+    def distancia_centroide_imagen(self, polygon, img_shape):
+        """
+        polygon: np.array de (N,2)
+        img_shape: (alto, ancho) de la imagen
+        """
+        h, w = img_shape[:2]
+        centro_img = np.array([w/2, h/2])
+        centro_poly = self.centroide_poligono(polygon)
+        dist = np.linalg.norm(centro_poly - centro_img)
+        return dist
+    def bbox(self, poly):
+        x, y = poly[:,0], poly[:,1]
+        return [x.min(), y.min(), x.max(), y.max()]
+
+    def iou_polygons_mask(self, pts_a, pts_b, img_shape):
+        """
+        pts_*: array-like (N,2) en coordenadas de imagen (x,y). Pueden ser float.
+        img_shape: (alto, ancho) de la máscara.
+        """
+        h, w = img_shape
+        m1 = np.zeros((h, w), dtype=np.uint8)
+        m2 = np.zeros((h, w), dtype=np.uint8)
+
+        # OpenCV espera int32 y coordenadas como (x,y)
+        pa = np.round(np.array(pts_a)).astype(np.int32)
+        pb = np.round(np.array(pts_b)).astype(np.int32)
+
+        # Bounding boxes
+        bx1, by1, bx2, by2 = self.bbox(pa)
+        cx1, cy1, cx2, cy2 = self.bbox(pb)
+
+        # ROI común
+        x1, y1 = max(bx1, cx1), max(by1, cy1)
+        x2, y2 = min(bx2, cx2), min(by2, cy2)
+
+        if x2 <= x1 or y2 <= y1:
+            return 0.0  # no hay intersección posible
+    
+        cv2.fillPoly(m1, [pa], 1)
+        cv2.fillPoly(m2, [pb], 1)
+
+        inter = np.logical_and(m1, m2).sum()
+        union = np.logical_or(m1, m2).sum()
+        iou = 0.0 if union == 0 else inter / union
+        return iou
+
+    def filter_same_trees(self, all_images_data, dom_shape):
+        all_terrain_points_dom = [im_data['terrain_points_dom'] for im_data in all_images_data]
+
+        segs_dom = [self.seg_pts_transform(data['segmentations'], data['H_rtk'])  
+                        for data in all_images_data]
+        
+        dist_polys = [[self.distancia_centroide_imagen(poly, img_shape = (data['image_height'],data['image_width'])) for poly in data['segmentations']]
+                        for data in all_images_data]
+        
+        overlap_graph = build_overlap_graph(all_terrain_points_dom, min_overlap = 0.45)
+        
+        revised = [[] for i in range(len(all_images_data))]
+        segs_filtered = [[] for i in range(len(all_images_data))]
+        
+        sames = []
+        for i, nbrs in tqdm(overlap_graph.items(), desc= "Filter Trees"):
+            segs_dom_i = segs_dom[i]
+            
+            for k, poly_i_k in enumerate(segs_dom_i):
+                
+                if k in revised[i]:
+                    print("Ya revisado:", (i,k))
+                    continue
+
+                same_detecs = [[(i,k), dist_polys[i][k], 1.0]]
+                for j, _ in nbrs:
+                    segs_dom_j = segs_dom[j]
+                    for l, poly_j_l in enumerate(segs_dom_j):
+                        iou = self.iou_polygons_mask(poly_i_k, poly_j_l, dom_shape)
+                        if iou > 0.5:
+                            same_detecs.append( [(j,l), dist_polys[j][l], iou])
+                
+                best_tree = min(same_detecs, key= lambda x: x[1])
+                print("(i,k):", (i,k))
+                print("same_detecs:", same_detecs)
+                print("best_tree:", best_tree)
+                best_tree_index = best_tree[0]
+                segs_filtered[best_tree_index[0]].append(best_tree_index[1])
+                for indexes, _, _ in same_detecs:
+                    revised[indexes[0]].append(indexes[1])
+
+                sames.append()
+        
+        for i, filtered_segs_i in enumerate(segs_filtered):
+            all_images_data[i]['segs_filtered_dom'] = [seg for k, seg in enumerate(segs_dom[i]) if k in filtered_segs_i]
+            all_images_data[i]['segs_filtered'] = [seg for k, seg in enumerate(all_images_data[i]["segmentations"]) if k in filtered_segs_i]
+            
+        return segs_filtered
+
 
     def create_mosaic(self, all_images_data, global_transforms, dom_shape):
         blended = np.zeros((dom_shape[0], dom_shape[1], 3), dtype=np.float32)
@@ -930,7 +1228,15 @@ class ImageSticher():
         trees_mask = np.zeros((dom_shape[0], dom_shape[1]), dtype=np.uint8)
         n_images = len(all_images_data)
         
+        debug_path = f"{self.result_dir}/mosiac/debug"
+        os.makedirs(debug_path, exist_ok = True)
+
+        os.makedirs(f"{debug_path}/proyectada", exist_ok = True)
+
+        os.makedirs(f"{debug_path}/alineada", exist_ok = True)
+        
         for index, row in tqdm(all_images_data.items(), total= n_images, desc = "Build Mosaic"):
+            print("index:", index)
             # Image Projection to Dom
             image = cv2.imread(row['relative_path'])
             image_distortion = distortion_correction(image)
@@ -938,32 +1244,36 @@ class ImageSticher():
             terrain_points_dom = row['terrain_points_dom']
             imagen_proyectada, mask = direct_project_image_to_dom(image_distortion, H_rtk, dom_shape, terrain_points_dom)
             
-            # Correction
-            projected_corrected = cv2.warpPerspective(imagen_proyectada, global_transforms[index], (int(dom_shape[1]), int(dom_shape[0])))
+            cv2.imwrite(f"{debug_path}/proyectada/{os.path.basename(row['relative_path'])[:-4]}_proyectada.png", imagen_proyectada.astype(np.uint8))
             
+            # Correction
+            projected_corrected = cv2.warpPerspective(imagen_proyectada, global_transforms[int(index)], (int(dom_shape[1]), int(dom_shape[0])))
+            
+            cv2.imwrite(f"{debug_path}/alineada/{os.path.basename(row['relative_path'])[:-4]}_proyectada_alineada.png", projected_corrected.astype(np.uint8))
+
             # Trees Masks
-            segs_dom = self.seg_pts_transform(row['segmentations'], H_rtk)
-            segs_dom = self.seg_pts_transform(segs_dom, global_transforms[index])
-            segs_dom_int = [np.array(poly, dtype=np.int32) for poly in segs_dom]
+            #segs_dom = self.seg_pts_transform(row['segs_filtered'], H_rtk)
+            #segs_dom = self.seg_pts_transform(row['segs_filtered_dom'], global_transforms[index])
+            #segs_dom_int = [np.array(poly, dtype=np.int32) for poly in segs_dom]
             
             trees_mask_image = np.zeros((dom_shape[0], dom_shape[1]), dtype=np.uint8)
-            cv2.fillPoly(trees_mask_image, segs_dom_int, 255)
+            #cv2.fillPoly(trees_mask_image, segs_dom_int, 255)
 
             #segs_dom = cv2.perspectiveTransform(segs_dom.reshape(-1, 1, 2), global_transforms[index]).reshape(-1, 2)
 
             # Blended
-            mask = cv2.warpPerspective(mask, global_transforms[index], (int(dom_shape[1]), int(dom_shape[0])))
+            mask = cv2.warpPerspective(mask, global_transforms[int(index)], (int(dom_shape[1]), int(dom_shape[0])))
             weights = calculate_weights(mask, None, FusionMethod.ROBUST_DRONE)
             
             max_weight = np.max(weights)
             if max_weight > 0:
                 weights = weights / max_weight
 
-            for poly in segs_dom_int:
-                mask_poly = np.zeros((dom_shape[0], dom_shape[1]), dtype=np.uint8)
-                cv2.fillPoly(mask_poly, [poly], 1)
-                val_weights = weights[mask_poly == 1]
-                weights[mask_poly == 1] = val_weights.max()
+            #for poly in segs_dom_int:
+            #    mask_poly = np.zeros((dom_shape[0], dom_shape[1]), dtype=np.uint8)
+            #    cv2.fillPoly(mask_poly, [poly], 1)
+            #    val_weights = weights[mask_poly == 1]
+            #    weights[mask_poly == 1] = val_weights.max()
 
             
             update_mask = weights > total_weights
@@ -972,7 +1282,10 @@ class ImageSticher():
           
             trees_mask[update_mask] = trees_mask_image[update_mask]
             
-            self.progress_update(40 + ((index * 50)// n_images))
+            self.progress_update(40 + ((int(index) * 50)// n_images))
+
+            if not self.check_continue_procress():
+                return
 
         final_dom = blended.astype(np.uint8).copy()
         
@@ -1034,21 +1347,274 @@ class ImageSticher():
         out_ds = None  # Cerrar el archivo
 
     def progress_update(self, percentaje):
+        print("update progress:", percentaje)
         if self.on_progress_change is not None:
+            print("update progress 2:", percentaje)
             self.on_progress_change(percentaje)
 
+    def mask_to_polygons(self, mask, offset_x=0, offset_y=0):
+        # Asegurar binaria tipo 0/255
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        polygons = []
+        for cnt in contours:
+            if len(cnt) >= 3:  # descartar degenerados
+                 # aplicar offset a cada punto
+                poly = [[int(x + offset_x), int(y + offset_y)] for [x, y] in cnt.squeeze(1).tolist()]
+                polygons.append(poly)
+        return polygons
     
-    def run(self, name_file = None, prefix_name = None, save_dir = "./mosaic"):
-        all_images_data_list = list(self.images_data.values())
+    def seam_blending_batch(self, subset_images, subset_masks, dom_size, subset_trees_mask = None, save_steps_dir = None):
+        print("--- Exposure compensation ---")
+        subset_images_warped = []
+        #cv2.UMat(img) for img in subset_images]
+        subset_masks_warped = []
+
+        subset_trees_warped = []
+        #cv2.UMat(mask) for mask in subset_masks]
+        corners = []
+        #corners = [(0, 0)] * len(subset_images_warped)
+
+        for img, mask, trees in zip(subset_images, subset_masks, subset_trees_mask):
+            cropped_img, cropped_mask, cropped_tree_mask, corner = crop_valid_region(img, mask, trees)
+            subset_images_warped.append(cropped_img)
+            subset_masks_warped.append(cropped_mask)
+            subset_trees_warped.append(cropped_tree_mask)
+            corners.append(corner)
+            
+        compensator = cv2.detail.ExposureCompensator_createDefault(
+            cv2.detail.ExposureCompensator_GAIN
+        )
+
+        compensator.feed(corners, subset_images_warped, subset_masks_warped)
+        print("--- Seam finding ---")
+        # --- Seam finding ---
+        seam_finder = cv2.detail_DpSeamFinder("COLOR")
+        masks = seam_finder.find(subset_images_warped, corners, subset_masks_warped)
+        print("--- Simple blending ---")
+
+        if save_steps_dir is not None: 
+            os.makedirs(save_steps_dir, exist_ok=True)
+            os.makedirs(f"{save_steps_dir}/detections", exist_ok=True)
+            os.makedirs(f"{save_steps_dir}/blend", exist_ok=True)
+
+        result = np.zeros((dom_size[0], dom_size[1], 3), np.float32)
+        mask_accum = np.zeros((dom_size[0], dom_size[1]), np.float32)
+        mask_trees_accum = np.zeros((dom_size[0], dom_size[1]), np.uint8)
+        
+        i=0
+        
+        for img, mask, corner, t_mask in tqdm(zip(subset_images_warped, masks, corners, subset_trees_warped), "Sub Blending", total = len(subset_images_warped)):
+            img = img.get() if isinstance(img, cv2.UMat) else img
+            mask = mask.get() if isinstance(mask, cv2.UMat) else mask
+            h,w = img.shape[:2]
+
+            mask_f = mask.astype(np.float32)# / 255.0
+            result[corner[1]: corner[1] + h, corner[0]: corner[0] + w, :] += img.astype(np.float32) * mask_f[..., None]
+            mask_accum[corner[1]: corner[1] + h, corner[0]: corner[0] + w] += mask_f
+            
+            trees_blended = cv2.bitwise_and(t_mask, t_mask, mask = mask_f.astype(np.uint8))
+            mask_trees_accum[corner[1]: corner[1] + h, corner[0]: corner[0] + w] += trees_blended
+            #trees_m = trees_bin.astype(np.uint8) * 255
+            poly_trees = self.mask_to_polygons(trees_blended, offset_x=corner[0], offset_y=corner[1])
+            print("mask:", mask.max())
+            if save_steps_dir:
+                cv2.imwrite(f"{save_steps_dir}/blend/im_{i+1}.jpg", img)
+                cv2.imwrite(f"{save_steps_dir}/blend/mask_blend_{i+1}.jpg", mask.astype(np.uint8) * 255)
+                cv2.imwrite(f"{save_steps_dir}/detections/trees_mask{i+1}.jpg", t_mask)
+                cv2.imwrite(f"{save_steps_dir}/detections/trees_mask_blended_{i+1}.jpg", trees_blended)
+            
+                with open(f"{save_steps_dir}/blend/corners_{i+1}.json", "w") as f:
+                    json.dump([[int(corner[0]), int(corner[1])], [w, h]],f, indent=4)
+
+                with open(f"{save_steps_dir}/detections/poly_trees_{i+1}.json", "w") as f:
+                    json.dump(poly_trees,f, indent=4)
+            i+=1
+
+        mask_trees_accum[mask_trees_accum > 0] = 255
+
+        mask_accum[mask_accum == 0] = 1
+        result /= mask_accum[..., None]
+        result = np.clip(result, 0, 255).astype(np.uint8)
+
+        final_dom = result.astype(np.uint8)
+
+        return final_dom, mask_accum, mask_trees_accum
+
+    def create_mosaic_batch_seam_blending(self, all_list_images_data, global_transforms, dom_size, save_dir_logs = "./blending"):
+        n_images = len(all_list_images_data)
+        print("n_images:", n_images)
+        images_warped = []
+        masks_warped = []
+        trees_warped = []
+        batch_size = 30
+        n_batches = n_images // batch_size + (1 if n_images % batch_size > 0 else 0)
+
+        print("n_batches:",n_batches)
+        for i in range(n_batches):
+            subset_images = []
+            subset_masks = []
+            subset_trees_mask = []
+            save_steps_dir = f"{save_dir_logs}/seam_batch_{i+1}"
+
+            for j in range(batch_size * i, min(batch_size* (i+1), n_images)):
+                row = all_list_images_data[j]
+                image = cv2.imread(row['relative_path'])
+                image_distortion = distortion_correction(image)
+                H_rtk = row['H_rtk']
+                H_global = global_transforms[j] @ H_rtk
+                terrain_points_dom = row['terrain_points_dom']
+                imagen_proyectada, mask = direct_project_image_to_dom(image_distortion, H_global, dom_size, terrain_points_dom)
+                
+                imagen_proyectada = imagen_proyectada.astype(np.uint8)
+                mask = mask.astype(np.uint8)
+                detect_path = row['detections_path']
+                mask_trees = self.read_trees_mask(detect_path, (image_distortion.shape[0],image_distortion.shape[1]))
+                
+                mask_trees_proyectada = cv2.warpPerspective(
+                            mask_trees,
+                            H_global,
+                            (int(dom_size[1]), int(dom_size[0])),
+                            flags=cv2.INTER_LANCZOS4  # Interpolación de alta calidad
+                )
+
+                subset_images.append(imagen_proyectada)
+                subset_masks.append(mask)
+                subset_trees_mask.append(mask_trees_proyectada)
+
+            patch_dom, patch_mask, patch_mask_trees = self.seam_blending_batch(subset_images, subset_masks, dom_size, subset_trees_mask, save_steps_dir)
+            patch_mask = (patch_dom.sum(axis=2) > 0).astype(np.uint8) * 255
+            patch_mask = patch_mask.astype(np.uint8)
+
+            images_warped.append(patch_dom)
+            masks_warped.append(patch_mask)
+            trees_warped.append(patch_mask_trees)
+            if not self.check_continue_procress():
+                return
+            self.progress_update(40 + (50 * i) // (batch_size + 1))
+        
+        save_steps_dir = f"{save_dir_logs}/seam_batch_final"
+
+        if len(images_warped) > 1:
+            final_dom, final_mask, final_trees = self.seam_blending_batch(images_warped, masks_warped, dom_size, trees_warped, save_steps_dir)
+            if not self.check_continue_procress():
+                return
+        else:
+            final_dom = images_warped[0]
+            final_mask = masks_warped[0]
+            final_trees = trees_warped[0]
+        
+        return final_dom, final_trees
+
+    def read_trees_mask(self, detect_path, im_shape):
+        with open(detect_path, "r") as f:
+            detecctions = json.load(f)
+        
+        detecctions = detecctions['detecctions']
+
+        segmentations = detecctions['segmentations']
+        mask_trees = np.zeros(im_shape, dtype=np.uint8)
+        contours = [np.array(seg, dtype=np.int32).reshape((-1,1,2)) for seg in segmentations]
+        mask_trees = cv2.drawContours(mask_trees, contours, -1, 255, -1)
+        return mask_trees
+    
+    def _generate_single_zoom_tiles(self, input_raster, output_dir, tile_size):
+        """
+        Función interna para generar tiles de un solo nivel de zoom con transparencia.
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        ds = gdal.Open(input_raster)
+        if ds is None:
+            raise ValueError(f"No se pudo abrir el archivo: {input_raster}")
+
+        # Obtener metadatos
+        geotransform = ds.GetGeoTransform()
+        projection = ds.GetProjection()
+        width = ds.RasterXSize
+        height = ds.RasterYSize
+        bands = ds.RasterCount
+        data_type = ds.GetRasterBand(1).DataType
+
+        driver = gdal.GetDriverByName('GTiff')
+        
+        for y in range(0, height, tile_size):
+            for x in range(0, width, tile_size):
+                tile_width = min(tile_size, width - x)
+                tile_height = min(tile_size, height - y)
+                
+                # Calcular nueva geotransform
+                new_geotransform = (
+                    geotransform[0] + x * geotransform[1],
+                    geotransform[1],
+                    geotransform[2],
+                    geotransform[3] + y * geotransform[5],
+                    geotransform[4],
+                    geotransform[5]
+                )
+                
+                output_path = os.path.join(output_dir, f"tile_{x}_{y}.tif")
+                
+                # Crear archivo de salida con opciones para transparencia
+                creation_options = []
+                if bands == 4:
+                    creation_options = ['PHOTOMETRIC=RGB', 'ALPHA=YES']
+                
+                out_ds = driver.Create(
+                    output_path,
+                    tile_width,
+                    tile_height,
+                    bands,
+                    data_type,
+                    options=creation_options
+                )
+                
+                if out_ds is None:
+                    print(f"Error al crear: {output_path}")
+                    continue
+                
+                out_ds.SetGeoTransform(new_geotransform)
+                out_ds.SetProjection(projection)
+                
+                # Copiar todas las bandas
+                for b in range(1, bands + 1):
+                    band_data = ds.GetRasterBand(b).ReadAsArray(x, y, tile_width, tile_height)
+                    out_band = out_ds.GetRasterBand(b)
+                    out_band.WriteArray(band_data)
+                    
+                    # Configurar banda alpha si es la cuarta banda
+                    if bands == 4 and b == 4:
+                        out_band.SetColorInterpretation(gdal.GCI_AlphaBand)
+                
+                out_ds.FlushCache()
+                out_ds = None
+
+        ds = None
+
+    def run(self, 
+            name_file = None, 
+            prefix_name = None,
+            detector_keypoints = "SIFT",
+            type_align_matrix = "affine"):
+        self.is_running = True
+        all_images_data_list = self.images_data
+        n_images = len(all_images_data_list)
         print("Comienza process_calculate_camera_pose")
         all_images_data_list = self.process_calculate_camera_pose(all_images_data_list)
         self.progress_update(2)
-
+        
+        if not self.check_continue_procress():
+            return
+        
         print("Comienza process_terrain_points")
         all_images_data_list = self.process_terrain_points(all_images_data_list)
+        if not self.check_continue_procress():
+                return
+        
         self.progress_update(4)
         print("Comienza estimate_dom_parameters")
         dom_bounds, dom_resolution = self.estimate_dom_parameters(all_images_data_list, margin_extension = 0.1)
+        if not self.check_continue_procress():
+                return
         self.progress_update(6)
 
         width_m = dom_bounds[1] - dom_bounds[0]
@@ -1058,66 +1624,123 @@ class ImageSticher():
         dom_size = (height_px, width_px)
         print("Comienza process_project_corners_to_dom")
         all_images_data_list = self.process_project_corners_to_dom(all_images_data_list, dom_bounds, dom_resolution)
+        if not self.check_continue_procress():
+                return
         self.progress_update(8)
+        
         print("Comienza process_detect_keypoint_descriptors_in_dom")
-        all_images_data_list = self.process_detect_keypoint_descriptors_in_dom(all_images_data_list, dom_size)
+        all_images_data_list = self.process_detect_keypoint_descriptors_in_dom(all_images_data_list, dom_size, detector_keypoints)
+        
+        if not self.check_continue_procress():
+                return
+        
         self.progress_update(20)
         print("Comienza calculate_pairwase_matches")
-        matches = self.calculate_pairwase_matches(all_images_data_list)
-        self.progress_update(30)
-        scale_factor = 1.0 / dom_size[0]
-        print("scale_factor:", scale_factor)
         
-        A, b = self.build_linear_system(self.images_data, matches, scale_factor = scale_factor)
-        global_transforms = self.solve_global_transforms(A.tocsr(), b, len(all_images_data_list), scale_factor = scale_factor)
-        print("global_transforms:", global_transforms)
+        all_terrain_points_dom = [d['terrain_points_dom'] for d in all_images_data_list]
+
+        # 2. Construir grafo de solapamiento
+        overlap_graph  = build_overlap_graph(all_terrain_points_dom, min_overlap=0.45)
+        # 5) Grafo y MST (Prim). Ruta de propacion
+        edges = estimate_pairwase_homographies(overlap_graph, all_images_data_list, type_align_matrix)
+
+        adj_graph = build_adjacency_graph_from_edges(n_images, edges)
+
+        mst = prim_mst(n_images, adj_graph)
+        # 6) Inicialización H absolute vía propagación en MST
+        H_abs = initialize_homographies(n_images, mst)
+        if not self.check_continue_procress():
+            return
         self.progress_update(40)
+
+        final_dom, trees_mask = self.create_mosaic_batch_seam_blending(
+            all_images_data_list,
+              H_abs, 
+              dom_size=(height_px, width_px),
+              save_dir_logs=f"{self.result_dir}/mosaic/blending")
+
+        
         print("Comienza transformations")
         
-        final_dom, trees_mask = self.create_mosaic(self.images_data, 
-                                       global_transforms, 
-                                       dom_shape = (height_px, width_px))
+        if not self.check_continue_procress():
+                return
+        
         self.progress_update(90)
         ref_zone_lon = self.images_data[0]['longitude']
         
         if name_file is None:
             name_file = datetime.now().strftime("%Y%m%d_%H%M%S") + ".tif"
-            name_file = prefix_name + "_" + name_file if prefix_name else name_file
+            if prefix_name is not None:
+                name_file = prefix_name + ".tif"
+            else:
+                name_file = prefix_name + "_" + name_file if prefix_name else name_file
         
-        os.makedirs(save_dir, exist_ok=True)
+        os.makedirs(f"{self.result_dir}/mosaic", exist_ok=True)
 
+        mosaic_path = f"{self.result_dir}/mosaic/{name_file}"
+        print("--------------Dividiendo en tiles-----------------")
         self.save_as_geotiff(
                 final_dom, 
-                f"{save_dir}/{name_file}", 
+                mosaic_path, 
                 dom_bounds[0], dom_bounds[3],  # Esquina superior izquierda (X,Y)
                 dom_resolution,
                 ref_zone_lon
         )
         
+        if not self.check_continue_procress():
+            return
+
+        self._generate_single_zoom_tiles(
+            input_raster = mosaic_path, 
+            output_dir = f"{self.result_dir}/mosaic/tiles_mosaic", 
+            tile_size = 256)
+        
+        if not self.check_continue_procress():
+                return
+        
         final_dom_out = final_dom.copy()
+        trees_mask_green = np.zeros_like(final_dom, dtype=np.uint8)
+        trees_mask_green[trees_mask > 0] = [0, 255, 0]
         final_dom_out[trees_mask > 0] = [0, 255, 0]
         alpha = 0.45
 
         final_out = cv2.addWeighted(final_dom_out, alpha, final_dom, 1-alpha, 0)
 
+        final_result_path = f"{self.result_dir}/mosaic/{name_file[:-4]}_TREES_RESULT.tif"
+
         self.save_as_geotiff(
             final_out,
-            f"{save_dir}/{name_file[:-4]}_TREES_RESULT.tif",
+            final_result_path,
             dom_bounds[0], dom_bounds[3],  # Esquina superior izquierda (X,Y)
             dom_resolution,
             ref_zone_lon
         )
 
+        if not self.check_continue_procress():
+            return
+
+        self._generate_single_zoom_tiles(
+            input_raster = final_result_path, 
+            output_dir = f"{self.result_dir}/mosaic/tiles_result", 
+            tile_size = 256)
+        
+        final_masks_trees = f"{self.result_dir}/mosaic/{name_file[:-4]}_MASK_TREES.tif"
+
         self.save_as_geotiff(
-            np.expand_dims(trees_mask, axis=-1),
-            f"{save_dir}/{name_file[:-4]}_MASK_TREES.tif",
+            trees_mask_green,#np.expand_dims(trees_mask, axis=-1),
+            final_masks_trees,
             dom_bounds[0], dom_bounds[3],  # Esquina superior izquierda (X,Y)
             dom_resolution,
             ref_zone_lon,
             alpha=0.5
         )
-        
 
+        self._generate_single_zoom_tiles(
+            input_raster = final_masks_trees, 
+            output_dir = f"{self.result_dir}/mosaic/tiles_mask_trees", 
+            tile_size = 256)
+        
+        
         self.progress_update(100)
 
 if __name__ == "__main__":
@@ -1128,7 +1751,7 @@ if __name__ == "__main__":
     #generate_mosaic(df_images.to_dict(orient='index'), type_align_matrix = "affine", signal_progress = None)
     image_sticher = ImageSticher(images_data =  df_images_slice.to_dict(orient='index'))
 
-    image_sticher.run(save_dir = "./mosaic", 
+    image_sticher.run(save_dir = "./", 
                       prefix_name="Vuelo-Agosto-15-Campo2-Accopampa")
     #generate_mosaic(all_images_data, type_align_matrix = "affine")
 #type_align_matrix = "affine"

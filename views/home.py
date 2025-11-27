@@ -1,14 +1,20 @@
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QSizePolicy, QPushButton, QSpacerItem, QFrame
-from PySide6.QtCore import Qt, QRectF
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QSizePolicy, QPushButton, QSpacerItem, QFrame, QFileDialog
+from PySide6.QtCore import Qt, QRectF, QSize
 from PySide6.QtGui import QIcon, QColor, QPixmap, QFontMetrics, QPainterPath, QPainter, QFont
 from PySide6.QtWidgets import QGraphicsDropShadowEffect
+from PySide6.QtCore import QStandardPaths
 from views.dialog_new_analysis import NewAnalysisDialog
+import json
+from views.dialog_new_analysis import AnalysisData
+import os
+import shutil
+from datetime import datetime
 
 def rounded_top_pixmap(image_path, radius, size):
     """Carga la imagen, la escala completa y le aplica solo esquinas superiores redondeadas."""
     # Escalar manteniendo toda la imagen visible
     pixmap = QPixmap(image_path).scaled(size.width(), size.height(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-
+    
     # Fondo transparente para que respete esquinas
     rounded = QPixmap(size)
     rounded.fill(Qt.transparent)
@@ -46,12 +52,26 @@ class RoundedImageLabel(QLabel):
 
 
 class AnalysisCard(QWidget):
-    def __init__(self, image_path, title, image_count, creation_date, parent = None):
+    def __init__(self, 
+                 image_path, 
+                 title, 
+                 image_count, 
+                 creation_date,
+                 base_dir, 
+                 on_click = None,
+                 on_delete=None,  # nuevo callback 
+                 parent = None):
         super().__init__()
-        # Layout principal
+
+        self.on_click = on_click
+        self.on_delete = on_delete
+        self.base_dir = base_dir
         self.setMaximumWidth(200)
+
+        # Layout principal
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0,0,0,0)
+        
         # Marco con borde
         frame = QFrame()
         frame.setObjectName("cardFrame")
@@ -63,15 +83,18 @@ class AnalysisCard(QWidget):
             }
             QFrame#cardFrame:hover {
                 border: 1px solid #a0a0a0;
-                box-shadow: 0px 4px 12px rgba(0,0,0,0.15);
             }
         """)
         frame_layout = QVBoxLayout(frame)
         frame_layout.setContentsMargins(0, 0, 0, 0)
         frame_layout.setSpacing(10)
-        #layout.setSpacing(5)
-        img_label = QLabel()
-        #img_label.setPixmap(QPixmap(image_path).scaled(200,350, Qt.KeepAspectRatio,  Qt.SmoothTransformation))
+
+        # --- Contenedor superior con imagen y botón borrar ---
+        top_frame = QFrame()
+        top_layout = QHBoxLayout(top_frame)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(0)
+
         img_label = RoundedImageLabel(image_path, 8)
         img_label.setAlignment(Qt.AlignCenter)
         img_label.setStyleSheet("""
@@ -79,9 +102,32 @@ class AnalysisCard(QWidget):
             border-top-left-radius: 8px;
             border-top-right-radius: 8px;
         """)
-        frame_layout.addWidget(img_label)
+
+        # Botón de eliminar (icono tacho)
+        delete_btn = QPushButton()
+        delete_btn.setIcon(QIcon("./assets/trash.svg"))  # coloca tu ícono de tacho
+        delete_btn.setIconSize(QSize(16,16))
+        delete_btn.setFixedSize(24,24)
+        delete_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(255,255,255,120);
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background: red;
+            }
+        """)
+        delete_btn.clicked.connect(self.confirm_delete)
+
+         # Añadir imagen y botón en misma fila
+        top_layout.addWidget(img_label)
+        top_layout.addWidget(delete_btn, alignment=Qt.AlignTop | Qt.AlignRight)
+
         
-        # Contenedor de texto
+        #frame_layout.addWidget(img_label)
+        
+        frame_layout.addWidget(top_frame)
+        # --- Contenedor inferior con texto ---
         text_frame = QFrame()
         text_frame.setStyleSheet("""
             QFrame {
@@ -127,7 +173,22 @@ class AnalysisCard(QWidget):
         #layout.addWidget(text_frame)
         layout.addWidget(frame)
 
+    def mousePressEvent(self, event):
+        print("Ir a otro projecto")
+        self.on_click(self.base_dir)
+        super().mousePressEvent(event)
 
+    def confirm_delete(self):
+        from PySide6.QtWidgets import QMessageBox
+        reply = QMessageBox.question(
+            self,
+            "Confirmar eliminación",
+            "¿Estás seguro de eliminar este análisis?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply == QMessageBox.Yes and self.on_delete:
+            self.on_delete(self.base_dir)  # ejecutar callback para borrar
+            print("Elminar Analisis")
         
 
 class AnalysisButton(QPushButton):
@@ -277,9 +338,39 @@ class CustomButton(QPushButton):
         self.adjustSize()
 
 
+APP_NAME = "AgroHass"
+ORG_NAME = "Inicteluni"
+
+class AppDataManager():
+    def __init__(self, app_name = APP_NAME, org_name = ORG_NAME):
+        self.app_name = app_name
+        self.org_name = org_name
+    
+    def get_config_path(self):
+        config_dir = QStandardPaths.writableLocation(QStandardPaths.AppConfigLocation)
+        return os.path.join(config_dir, "recent_projects.json")
+    
+    def load_recent_projects(self):
+        config_path = self.get_config_path()
+        if os.path.exists(config_path):
+            with open(config_path,  "r") as f:
+                return json.load(f)
+        return []
+    
+    def save_recent_projects(self, projects):
+        config_path = self.get_config_path()
+        with open(config_path, "w") as f:
+            json.dump(projects, f, indent = 4)
+    
+    def add_new_project(self, project_info):
+        projects = self.load_recent_projects()
+        self.save_recent_projects([project_info] + projects)
+
 class Home(QWidget):
     def __init__(self, main_window=None):
         super().__init__()
+
+        self.appdata_manager = AppDataManager()
         self.main_window = main_window
         layout = QVBoxLayout()
         layout.setAlignment(Qt.AlignCenter)
@@ -295,7 +386,8 @@ class Home(QWidget):
         button_new = AnalysisButton("./assets/new.svg", "Nuevo Análisis", "Genera un nuevo analisis a partir de imagenes aereas para identificar deficiencias nutricionales.")
         button_new.clicked.connect(self.open_new_analysis_dialog)
         button_open = AnalysisButton("./assets/open.svg", "Abrir Análisis", "Abre un análisis guardado y revisa la informacion obtenida.")
-        
+        button_open.clicked.connect(self.open_analysis) 
+
         buttons_layout.addWidget(button_new)
         #buttons_layout.addSpacerItem(QSpacerItem(20,0, QSizePolicy.Expanding, QSizePolicy.Minimum))
         buttons_layout.addWidget(button_open)
@@ -308,34 +400,161 @@ class Home(QWidget):
         analysis_recientes.setStyleSheet("font-size:18px; font-weight: bold; padding: 0px 0px 10px 0px;")
         recientes_layout.addWidget(analysis_recientes)
         # Cards Analisis
-        cards_layout = QHBoxLayout()
-        cards_layout.setContentsMargins(0,0,0,0)
-        for i in range(4):
-            cards_layout.addWidget(AnalysisCard("./assets/card-example.png","Vuelo-Julio-15-2025-Campo-Acampampa-1", 312, "15/07/2025"))
+        
+        self.cards_layout = QHBoxLayout()
+        self.cards_layout.setContentsMargins(0,0,0,0)
+
+        #self.cards_data = [
+        #    ("./assets/card-example.png","Vuelo-Julio-15-2025-Campo-Acampampa-1", 312, "15/07/2025"),
+        #    ("./assets/card-example.png","Vuelo-Julio-15-2025-Campo-Acampampa-1", 312, "15/07/2025"),
+        #    ("./assets/card-example.png","Vuelo-Julio-15-2025-Campo-Acampampa-1", 312, "15/07/2025"),
+        #    ("./assets/card-example.png","Vuelo-Julio-15-2025-Campo-Acampampa-1", 312, "15/07/2025")
+        #]
+        
+        self.recient_projects = []
+        #for i in range(4):
+        #    self.cards_layout.addWidget(AnalysisCard("./assets/card-example.png","Vuelo-Julio-15-2025-Campo-Acampampa-1", 312, "15/07/2025"))
             #spacer = QSpacerItem(0, 0, QSizePolicy.Expanding, QSizePolicy.Minimum)
-            #cards_layout.addSpacerItem(spacer)
-            spacer_widget = QWidget()
-            spacer_widget.setMaximumWidth(50)
-            spacer_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-            cards_layout.addWidget(spacer_widget)
-            #cards_layout.addStretch()
+            #self.cards_layout.addSpacerItem(spacer)
+        #    spacer_widget = QWidget()
+        #    spacer_widget.setMaximumWidth(50)
+        #    spacer_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        #    self.cards_layout.addWidget(spacer_widget)
+            #self.cards_layout.addStretch()
+        self.refresh_cards()
+        self.cards_layout.setAlignment(Qt.AlignLeft) 
 
-        cards_layout.setAlignment(Qt.AlignLeft) 
-
-        recientes_layout.addLayout(cards_layout)
+        recientes_layout.addLayout(self.cards_layout)
         layout.addWidget(title)
         layout.addLayout(buttons_layout)
         #layout.addWidget(analysis_recientes)
         layout.addLayout(recientes_layout)
         self.setLayout(layout)
 
-  
+
+    def refresh_cards(self):
+        self.recient_projects = self.appdata_manager.load_recent_projects()[:5]
+        #self.recient_projects = self.recient_projects[1:]
+
+        #self.appdata_manager.save_recent_projects(self.recient_projects)
+        #print("recient_projects:", self.recient_projects)
+        
+        on_click_card = lambda path: self.load_analysis(path)
+        
+        def on_delete_card(base_dir):
+            # Borrar del JSON
+            projects = self.appdata_manager.load_recent_projects()
+            projects = [p for p in projects if p["base_dir"] != base_dir]
+            self.appdata_manager.save_recent_projects(projects)
+            # Refrescar vista
+
+            if os.path.exists(base_dir):
+                try:
+                    shutil.rmtree(base_dir)  # elimina carpeta completa
+                    print(f"Carpeta eliminada: {base_dir}")
+                except Exception as e:
+                    print(f"Error eliminando carpeta {base_dir}: {e}")
+            self.refresh_cards()
+
+        self.cards_data = [ ("./assets/card-example.png", 
+                             data['name'],
+                             data['num_images'],
+                             datetime.fromisoformat(data['creation_date']).strftime("%d/%m/%Y"),
+                             data["base_dir"],
+                             on_click_card,
+                             on_delete_card
+                             ) for data in self.recient_projects]
+        
+        while self.cards_layout.count():
+            item = self.cards_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        
+        for data in self.cards_data:
+            self.cards_layout.addWidget(AnalysisCard(*data))
+            spacer_widget = QWidget()
+            spacer_widget.setMaximumWidth(50)
+            spacer_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            self.cards_layout.addWidget(spacer_widget)
+
+    
+
     def open_new_analysis_dialog(self):
         dialog = NewAnalysisDialog(self)
         
         def handle_finished_configure():
             self.main_window.update_analysis_data(dialog.new_analysis_data_store)
+            base_dir = dialog.new_analysis_data_store.base_dir
+            images_data = dialog.new_analysis_data_store.images_data
+            name = dialog.new_analysis_data_store.name
+            
+            project_info = {
+                    "name": name,
+                    "creation_date": datetime.now().isoformat(),
+                    "num_images": len(images_data),
+                    "base_dir": base_dir
+                }
+            
+            config = {
+                    "project_info": project_info,
+                    "image_metatada": images_data
+                }
+            
+            self.save_configure_analysis(base_dir, config)
+
+            self.appdata_manager.add_new_project(project_info)
         
         dialog.image_data_screen.finished_configure.connect(handle_finished_configure)
 
         dialog.exec()
+    
+    def save_configure_analysis(self, base_dir, data):
+        import json
+        with open(f"{base_dir}/config.json", "w") as f:
+            json.dump(data, f, indent=4) 
+
+    def load_analysis(self, path_dir):
+        with open(f"{path_dir}/config.json", "r") as f:
+            config = json.load(f)
+        
+        project_info = config['project_info']
+        print("project_info:", project_info)
+        
+        images_data = config['image_metatada']
+        print("Cargando datos.....")
+        images_data = {i: images_data[str(i)] for i in range(len(images_data))}
+        
+
+        analysis_data = AnalysisData(base_dir = project_info['base_dir'], name = project_info['name'], images_data=images_data)
+        print("Actualizando Vistas.....")
+        
+        self.main_window.update_analysis_data(analysis_data)
+
+        result_dir = self.main_window.analysis_data_store.base_dir
+
+        print("Cargando result_dir:", result_dir)
+
+        mosaic_path = f"{result_dir}/mosaic/tiles_mosaic"
+        
+        layers_path = dict(
+            rgb = f"{result_dir}/mosaic/rgb",
+            ndvi = f"{result_dir}/mosaic/ndvi",
+            map_deficiencies = f"{result_dir}/mosaic/map_deficiencies"
+        )
+        
+        trees_seg = f"{result_dir}/mosaic/tiles_mask_trees"
+
+        self.main_window.page_map_trees.layers_ready.emit(mosaic_path, layers_path)
+
+    def open_analysis(self):
+        path_dir = QFileDialog.getExistingDirectory(
+            self,
+            "Seleciona Carpeta de Analisis Anterior",
+            "",
+        )
+
+        if path_dir:
+            print("Ruta de analisis:", path_dir)
+            self.load_analysis(path_dir)
+
+
