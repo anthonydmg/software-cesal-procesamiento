@@ -539,7 +539,7 @@ class Home(QWidget):
         layers_path = dict(
             rgb = f"{result_dir}/mosaic/rgb",
             ndvi = f"{result_dir}/mosaic/ndvi",
-            map_deficiencies = f"{result_dir}/mosaic/map_deficiencies"
+            map_deficiencies = f"{result_dir}/mosaic/rgb"
         )
         
         trees_seg = f"{result_dir}/mosaic/tiles_mask_trees"

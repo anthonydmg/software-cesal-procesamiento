@@ -76,3 +76,5 @@ analisis/
 *.pt
 *.png
 *.csv
+*.pdf
+*.ipynb

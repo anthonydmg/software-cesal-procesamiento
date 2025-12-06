@@ -1,214 +1,145 @@
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from matplotlib.figure import Figure
+from PySide6.QtWidgets import QApplication, QMainWindow
 import sys
-from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel,
-                               QPushButton, QVBoxLayout, QHBoxLayout,
-                               QGridLayout, QFrame, QToolButton)
-from PySide6.QtGui import QIcon, QPixmap, QFont, QColor
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtGui import QGuiApplication
+from PySide6.QtCore import Qt
 
-class SidebarButton(QToolButton):
-    def __init__(self, icon_path, text):
-        super().__init__()
-        self.setIcon(QIcon.fromTheme(icon_path))
-        self.setIconSize(QSize(32,32))
-        self.setText(text)
-        self.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
-        self.setFixedHeight(80)
-        self.setStyleSheet("""
-            QToolButton {
-                border: none;
-                background: transparent;
-                font-size: 12px;
-            }
-            QToolButton:hover {
-                background-color: #e0e0e0;
-            }
-        """)
+from PySide6.QtWidgets import QWidget, QVBoxLayout
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from matplotlib.figure import Figure
+from PySide6.QtGui import QPainter, QColor, QFont, QPen
+from PySide6.QtCore import Qt, QRectF
 
-class AgroHassApp(QMainWindow):
+class DonutChartWidget(QWidget):
+    def __init__(self, healthy=65, deficient=35, parent=None):
+        super().__init__(parent)
+
+        self.healthy = healthy
+        self.deficient = deficient
+        self.percentage_healthy = round(healthy * 100 / (healthy + deficient), 1) 
+        self.percentage_deficient = round(deficient * 100 / (healthy + deficient),1) 
+
+        # Para una mejor calidad en pantallas HiDPI
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setMinimumSize(200, 200)
+
+    # =================================================
+    #                  DIBUJAR DONUT
+    # =================================================
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+
+        w = self.width()
+        h = self.height()
+        size = min(w, h)
+
+        cx = w / 2
+        cy = h / 2
+        radius = size * 0.40
+        thickness = radius * 0.30
+
+        rect = QRectF(
+            cx - radius,
+            cy - radius,
+            radius * 2,
+            radius * 2
+        )
+
+        # ========================
+        # Arcos (Healthy / Deficient)
+        # ========================
+        start_angle = 0#90 * 48
+
+        healthy_angle = int(360 * (self.healthy / 100) * 16)
+        deficient_angle = int(360 * (self.deficient / 100) * 16)
+
+        # HEALTHY (verde)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#22A529"))
+        p.drawPie(rect, start_angle, healthy_angle)
+
+        # DEFICIENT (amarillo)
+        p.setBrush(QColor("#FFC000"))
+        p.drawPie(rect, start_angle + healthy_angle, deficient_angle)
+
+        # ========================
+        # agujero interior (donut)
+        # ========================
+        inner_radius = radius - thickness
+        hole = QRectF(
+            cx - inner_radius,
+            cy - inner_radius,
+            inner_radius * 2,
+            inner_radius * 2
+        )
+
+        p.setBrush(QColor(self.palette().window().color()))
+        p.drawEllipse(hole)
+
+        # ==================================================
+        #                   TEXTOS
+        # ==================================================
+        def draw_text(center_x, center_y, text, size_ratio, bold=False, color=QColor("black")):
+            font = QFont("Segoe UI", int(size * size_ratio))
+            font.setBold(bold)
+            p.setFont(font)
+            p.setPen(color)
+
+            p.drawText(
+                QRectF(center_x - radius, center_y - radius, radius*2, radius*2),
+                Qt.AlignCenter,
+                text
+            )
+        # TEXTOS IZQUIERDA (Healthy)
+        left_x = cx #- radius * 0.10
+        top_left_y = cy - radius * 0.50
+
+        print("left_x:", left_x)
+        print("top_left_y:", top_left_y)
+        draw_text(left_x, top_left_y, "Saludable", 0.03, True, QColor("#22A529"))
+        draw_text(left_x, top_left_y + radius * 0.15, f"{self.percentage_healthy}%", 0.04, True, QColor("black"))
+        draw_text(left_x, top_left_y + radius * 0.30, f"({self.healthy} Árboles)", 0.03, False, QColor("gray"))
+
+        # TEXTOS DERECHA (Deficient)
+        right_x = cx #+ radius * 0.90
+        top_right_y = cy + radius * 0.10
+
+        draw_text(right_x, top_right_y, "Con Deficiencia",  0.03, True, QColor("#FFC000"))
+        draw_text(right_x, top_right_y + radius * 0.15, f"{self.percentage_deficient}%", 0.04, True, QColor("black"))
+        draw_text(right_x, top_right_y + radius * 0.30, f"({self.deficient} Árboles)", 0.03  , False, QColor("gray"))
+
+    # =================================================
+    #       ACTUALIZAR VALORES EXTERNAMENTE
+    # =================================================
+    def update_values(self, healthy, deficient):
+        self.healthy = healthy
+        self.deficient = deficient
+        
+        self.percentage_healthy = round(healthy * 100 / (healthy + deficient), 2) 
+        self.percentage_deficient = round(deficient * 100 / (healthy + deficient),2) 
+        self.update()
+
+
+class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("AgroHass")
-        self.setMinimumSize(1200, 800)
-        self.initUI()
+        container = QWidget()
+        layout = QVBoxLayout(container)
 
-    def initUI(self):
-        # Widget central
-        central_widget = QWidget()
-        central_widget.setStyleSheet("background-color: white;")  # fondo blanco
-        central_layout = QHBoxLayout()
-        central_widget.setLayout(central_layout)
-        self.setCentralWidget(central_widget)
-
-        # Sidebar izquierda
-        sidebar = QFrame()
-        sidebar.setFrameShape(QFrame.StyledPanel)
-        sidebar.setFixedWidth(80)  # más delgada
-        sidebar.setStyleSheet("background-color: white;")  # fondo blanco
-        sidebar_layout = QVBoxLayout()
-        sidebar_layout.setAlignment(Qt.AlignTop)
-        sidebar.setLayout(sidebar_layout)
-
-        # Logo AgroHass arriba en negrita
-        logo_label = QLabel("AgroHass")
-        logo_label.setAlignment(Qt.AlignCenter)
-        font_logo = QFont()
-        font_logo.setPointSize(10)
-        font_logo.setBold(True)
-        logo_label.setFont(font_logo)
-        sidebar_layout.addWidget(logo_label)
-
-        # Menú con iconos arriba y texto abajo
-        btn_inicio = SidebarButton("go-home", "Inicio")
-        sidebar_layout.addWidget(btn_inicio)
-
-        btn_mapa = SidebarButton("emblem-photos", "Mapa de Capturas")
-        sidebar_layout.addWidget(btn_mapa)
-
-        btn_mosaico = SidebarButton("image-x-generic", "Mosaico")
-        sidebar_layout.addWidget(btn_mosaico)
-
-        sidebar_layout.addStretch()
-
-        # Panel principal
-        main_panel = QWidget()
-        main_layout = QVBoxLayout()
-        main_panel.setLayout(main_layout)
-
-        # Título superior
-        title_label = QLabel("Análisis de salud del cultivo")
-        font_title = QFont()
-        font_title.setPointSize(16)
-        font_title.setBold(True)
-        title_label.setFont(font_title)
-        main_layout.addWidget(title_label)
-
-        # Toolbar debajo del título
-        toolbar_layout = QHBoxLayout()
-
-        btn_zoom_in = QToolButton()
-        btn_zoom_in.setIcon(QIcon.fromTheme("zoom-in"))
-        btn_zoom_in.setToolTip("Zoom In")
-        btn_zoom_in.setIconSize(QSize(24,24))
-
-        btn_zoom_out = QToolButton()
-        btn_zoom_out.setIcon(QIcon.fromTheme("zoom-out"))
-        btn_zoom_out.setToolTip("Zoom Out")
-        btn_zoom_out.setIconSize(QSize(24,24))
-
-        btn_download = QToolButton()
-        btn_download.setIcon(QIcon.fromTheme("document-save"))
-        btn_download.setToolTip("Descargar")
-        btn_download.setIconSize(QSize(24,24))
-
-        # Botón Generar Reporte
-        btn_report = QPushButton("Generar Reporte")
-        btn_report.setStyleSheet("background-color: #4CAF50; color: white; padding:6px 12px; border-radius:5px;")
-        btn_report.setIcon(QIcon.fromTheme("document-new"))
-        btn_report.setIconSize(QSize(20,20))
-        btn_report.setCursor(Qt.PointingHandCursor)
-
-        toolbar_layout.addWidget(btn_zoom_in)
-        toolbar_layout.addWidget(btn_zoom_out)
-        toolbar_layout.addWidget(btn_download)
-        toolbar_layout.addStretch()
-        toolbar_layout.addWidget(btn_report)
-
-        main_layout.addLayout(toolbar_layout)
-
-        # Layout horizontal para mapa y leyenda
-        map_legend_layout = QHBoxLayout()
-
-        # Mapa (placeholder)
-        map_label = QLabel()
-        map_pixmap = QPixmap(700, 500)
-        map_pixmap.fill(QColor("#2e7d32"))  # verde oscuro como placeholder
-        map_label.setPixmap(map_pixmap)
-        map_label.setScaledContents(True)
-
-        map_legend_layout.addWidget(map_label)
-
-        # Leyenda en vertical
-        right_panel = QVBoxLayout()
-
-        # Leyenda Nutricional
-        legend_title = QLabel("Leyenda Nutricional")
-        font_legend = QFont()
-        font_legend.setBold(True)
-        legend_title.setFont(font_legend)
-        right_panel.addWidget(legend_title)
-
-        legend_items = [
-            ("SALUDABLE", "#00ff00"),
-            ("DEFICIENCIA NITROGENO", "#aaff00"),
-            ("DEFICIENCIA ZINC", "#ffaa00"),
-            ("DEFICIENCIA MAGNESIO", "#ffcc00"),
-            ("DEFICIENCIA NITROGENO Y ZINC", "#ff8800"),
-            ("DEFICIENCIA NITROGENO Y MAGNESIO", "#ff6600"),
-            ("DEFICIENCIA ZINC Y MAGNESIO", "#ff4400"),
-            ("DEFICIENCIA NITROGENO ZINC Y MAGNESIO", "#ff0000")
-        ]
-
-        # Leyenda en grid
-        legend_grid = QGridLayout()
-        row = 0
-        for name, color in legend_items:
-            # Color box
-            color_label = QLabel()
-            color_pixmap = QPixmap(20,20)
-            color_pixmap.fill(QColor(color))
-            color_label.setPixmap(color_pixmap)
-
-            # Texto
-            text_label = QLabel(name)
-
-            # Layout horizontal para cada item
-            item_layout = QHBoxLayout()
-            item_layout.addWidget(color_label)
-            item_layout.addWidget(text_label)
-            item_layout.addStretch()
-
-            # Contenedor del item
-            item_widget = QWidget()
-            item_widget.setLayout(item_layout)
-
-            # Añade el item al grid
-            legend_grid.addWidget(item_widget, row, 0, 1, 2)
-
-            # Línea de separación
-            line = QFrame()
-            line.setFrameShape(QFrame.HLine)
-            line.setFrameShadow(QFrame.Sunken)
-            line.setStyleSheet("color: #cccccc;")
-            legend_grid.addWidget(line, row + 1, 0, 1, 2)
-
-            row += 2  # Incrementa por 2 debido al item + línea
-
-        right_panel.addLayout(legend_grid)
-        right_panel.addStretch()
-
-        map_legend_layout.addLayout(right_panel)
-
-        main_layout.addLayout(map_legend_layout)
-
-        # Añadir sidebar y main panel al layout central
-        central_layout.setContentsMargins(0, 0, 0, 0)
-        central_layout.setSpacing(0)
-        central_layout.addWidget(sidebar)
-        central_layout.addWidget(main_panel)
-
-        # Estilos generales
-        self.setStyleSheet("""
-            QToolButton {
-                padding:5px;
-            }
-            QToolButton:hover {
-                background-color: #e0e0e0;
-            }
-        """)
+        chart = DonutChartWidget(healthy=70, deficient=30)
+        chart.update_values(healthy=150, deficient=30)
+        layout.addWidget(chart)
+        #chart = DonutChartWidget(healthy=65, deficient=35)
+        self.setCentralWidget(container)
 
 if __name__ == "__main__":
+    
+   
     app = QApplication(sys.argv)
-    window = AgroHassApp()
+    window = MainWindow()
     window.show()
     sys.exit(app.exec())
 

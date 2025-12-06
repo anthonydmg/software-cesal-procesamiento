@@ -17,7 +17,7 @@ class ReportGenerator():
         else:
             pdf_file = save_path
         
-        os.makedirs(os.path.dirname(save_path), exist_ok= True)
+        #os.makedirs(os.path.dirname(save_path), exist_ok= True)
 
         c = canvas.Canvas(pdf_file, pagesize=A4)
 
@@ -166,7 +166,7 @@ class ReportGenerator():
 
 if __name__ == "__main__":
     report_generator = ReportGenerator()
-    report_generator.create_report(save_path = "./")
+    report_generator.create_report()
 
 
 

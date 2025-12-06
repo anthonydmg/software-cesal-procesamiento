@@ -190,45 +190,11 @@ class ImageProcessor(QObject):
         self.name_analysis = name_analysis
         #self.model = MemoryAwareYOLOModel.get_instance()
 
-    def process(self):
-        try:
-           
-            
-            #images_path = df_images_slice['relative_path'].to_list()
-            detector = TreeDetectorYolo.get_instance()
-            #predictions = detector.predict(images_path, save_dir = "./results")
-            #
-            #
-            
-            # self.image_data.values()
-            images_data_list = list(self.image_data.values())
-
-            print("Numero de Imagenes Orignales:", len(images_data_list))
-            
-            metadata_rgb_files = [img_m for img_m in images_data_list if "_D.JPG" in img_m['relative_path']]
-            print("Numero de Imagenes RGB:", len(metadata_rgb_files))
-            # Filtramos que no son perpendiculares
-            metadata_rgb_files = [ im_data for im_data in metadata_rgb_files if im_data["pitch_degree"] < -89 and im_data['pitch_degree'] > -91]
-
-            print("Numero de Imagenes Perpendiculares:", len(metadata_rgb_files))
-            total = len(metadata_rgb_files)
-            processed = 0
-            batch_results = {}
-
-            all_predictions = []
-            for img_id, img_data in enumerate(metadata_rgb_files):
-
-                #progress = int((processed / total) * 100)
-                #self.progress_updated.emit(
-                #    progress 
-                #)
-
-                #if processed % self.batch_size == 0:
-                #    batch_results = {}
-                #    QThread.msleep(100)
-                #processed += 1
-                #continue
-
+    def trees_detection_process(self, metadata_rgb_files):
+        total = len(metadata_rgb_files)
+        detector = TreeDetectorYolo.get_instance()
+        all_predictions = []
+        for img_id, img_data in enumerate(metadata_rgb_files):
                 if not self.is_running:
                     self.cancelled.emit()
                     break
@@ -246,16 +212,30 @@ class ImageProcessor(QObject):
                 except Exception as e:
                     print(f"Error en {img_id}: {str(e)}")
             
+        assert len(all_predictions) == len(metadata_rgb_files), "El numero de predicciones deber ser igual a la cantidad de imaganes"
+
+    def process(self):
+        try:
             
+            all_images_data_metadata = list(self.image_data.values())
+            print("Numero de Imagenes Orignales:", len(all_images_data_metadata))
+            # Filtramos que no son perpendiculares
+            all_images_data_metadata = [ im_data for im_data in all_images_data_metadata if im_data["pitch_degree"] < -89 and im_data['pitch_degree'] > -91]
+
+            print("Numero de Imagenes Perpendiculares:", len(all_images_data_metadata))
+
+            metadata_rgb_files = [img_m for img_m in all_images_data_metadata if "_D.JPG" in img_m['relative_path']]
             
-            assert len(all_predictions) == len(metadata_rgb_files), "El numero de predicciones deber ser igual a la cantidad de imaganes"
+            print("Numero de Imagenes RGB:", len(metadata_rgb_files))
+            
+            self.trees_detection_process(self, metadata_rgb_files)
             
             for row in metadata_rgb_files:
                 row["detections_path"] = f"{self.result_dir}/results/detections/{row['name'][:-4]}_DETECTIONS.json"
             # (progress // 100)*60 + 40
             print("Comienza Generacion de Mosaico")
             
-            self.images_sticher = ImageSticher(images_data = metadata_rgb_files, 
+            self.images_sticher = ImageSticher(images_data = all_images_data_metadata, 
                          on_progress_change = lambda progress: self.progress_updated.emit( int((progress / 100) * 60) + 40),
                          on_cancel = lambda: self.cancelled.emit(),
                          result_dir = self.result_dir)
