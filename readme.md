@@ -5,8 +5,8 @@ Software para procesamiento y analisis de imagenes aereas de cultivos de paltas 
 
 ## Install
 ```bash
-git clone https://github.com/your-username/agrohass.git
-cd agrohass
+git clone https://github.com/anthonydmg/software-cesal-procesamiento.git
+cd software-cesal-procesamiento
 conda env create -f requirements.yaml
 ```
 
