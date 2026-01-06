@@ -273,7 +273,7 @@ class MainWindow(QMainWindow):
     def setup_variables(self):
         self.processor_thread = None
         self.processor = None
-        self.result_storage = ResultStorage(output_dir="segmentacion_results")
+        #self.result_storage = ResultStorage(output_dir="segmentacion_results")
         self.image_data = {}
 
     def setup_connections(self):

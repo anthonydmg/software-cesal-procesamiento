@@ -3,6 +3,7 @@ from PySide6.QtCore import Qt, QRectF, QSize
 from PySide6.QtGui import QIcon, QColor, QPixmap, QFontMetrics, QPainterPath, QPainter, QFont
 from PySide6.QtWidgets import QGraphicsDropShadowEffect
 from PySide6.QtCore import QStandardPaths
+from core.utils import resource_path
 from views.dialog_new_analysis import NewAnalysisDialog
 import json
 from views.dialog_new_analysis import AnalysisData
@@ -105,7 +106,7 @@ class AnalysisCard(QWidget):
 
         # Botón de eliminar (icono tacho)
         delete_btn = QPushButton()
-        delete_btn.setIcon(QIcon("./assets/trash.svg"))  # coloca tu ícono de tacho
+        delete_btn.setIcon(QIcon(resource_path(os.path.join("assets", "trash.svg"))))  # coloca tu ícono de tacho
         delete_btn.setIconSize(QSize(16,16))
         delete_btn.setFixedSize(24,24)
         delete_btn.setStyleSheet("""
@@ -383,9 +384,9 @@ class Home(QWidget):
         buttons_layout.setContentsMargins(0,10,0,10)
         buttons_layout.setSpacing(60)
         buttons_layout.addStretch()
-        button_new = AnalysisButton("./assets/new.svg", "Nuevo Análisis", "Genera un nuevo analisis a partir de imagenes aereas para identificar deficiencias nutricionales.")
+        button_new = AnalysisButton(resource_path(os.path.join("assets", "new.svg")), "Nuevo Análisis", "Genera un nuevo analisis a partir de imagenes aereas para identificar deficiencias nutricionales.")
         button_new.clicked.connect(self.open_new_analysis_dialog)
-        button_open = AnalysisButton("./assets/open.svg", "Abrir Análisis", "Abre un análisis guardado y revisa la informacion obtenida.")
+        button_open = AnalysisButton(resource_path(os.path.join("assets", "open.svg")), "Abrir Análisis", "Abre un análisis guardado y revisa la informacion obtenida.")
         button_open.clicked.connect(self.open_analysis) 
 
         buttons_layout.addWidget(button_new)
@@ -404,23 +405,9 @@ class Home(QWidget):
         self.cards_layout = QHBoxLayout()
         self.cards_layout.setContentsMargins(0,0,0,0)
 
-        #self.cards_data = [
-        #    ("./assets/card-example.png","Vuelo-Julio-15-2025-Campo-Acampampa-1", 312, "15/07/2025"),
-        #    ("./assets/card-example.png","Vuelo-Julio-15-2025-Campo-Acampampa-1", 312, "15/07/2025"),
-        #    ("./assets/card-example.png","Vuelo-Julio-15-2025-Campo-Acampampa-1", 312, "15/07/2025"),
-        #    ("./assets/card-example.png","Vuelo-Julio-15-2025-Campo-Acampampa-1", 312, "15/07/2025")
-        #]
-        
+  
         self.recient_projects = []
-        #for i in range(4):
-        #    self.cards_layout.addWidget(AnalysisCard("./assets/card-example.png","Vuelo-Julio-15-2025-Campo-Acampampa-1", 312, "15/07/2025"))
-            #spacer = QSpacerItem(0, 0, QSizePolicy.Expanding, QSizePolicy.Minimum)
-            #self.cards_layout.addSpacerItem(spacer)
-        #    spacer_widget = QWidget()
-        #    spacer_widget.setMaximumWidth(50)
-        #    spacer_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        #    self.cards_layout.addWidget(spacer_widget)
-            #self.cards_layout.addStretch()
+
         self.refresh_cards()
         self.cards_layout.setAlignment(Qt.AlignLeft) 
 
@@ -456,7 +443,8 @@ class Home(QWidget):
                     print(f"Error eliminando carpeta {base_dir}: {e}")
             self.refresh_cards()
 
-        self.cards_data = [ ("./assets/card-example.png", 
+        
+        self.cards_data = [ (self.get_card_image(data["base_dir"]), 
                              data['name'],
                              data['num_images'],
                              datetime.fromisoformat(data['creation_date']).strftime("%d/%m/%Y"),
@@ -477,8 +465,18 @@ class Home(QWidget):
             spacer_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
             self.cards_layout.addWidget(spacer_widget)
 
-    
-
+    def get_card_image(self, base_dir):
+        sumary_path = os.path.join(base_dir, "processing_sumary.json")
+        if os.path.exists(sumary_path):
+            processing_sumary = None
+            with open(sumary_path, "r") as f:
+                processing_sumary = json.load(f)
+            
+            if processing_sumary and "card_map" in processing_sumary:
+                    return processing_sumary["card_map"]
+        
+        return resource_path(os.path.join("assets", "card_default.png"))
+        
     def open_new_analysis_dialog(self):
         dialog = NewAnalysisDialog(self)
         
@@ -534,17 +532,13 @@ class Home(QWidget):
 
         print("Cargando result_dir:", result_dir)
 
-        mosaic_path = f"{result_dir}/mosaic/tiles_mosaic"
+        mosaic_path = f"{result_dir}/mosaic/rgb/tiles"
         
-        layers_path = dict(
-            rgb = f"{result_dir}/mosaic/rgb",
-            ndvi = f"{result_dir}/mosaic/ndvi",
-            map_deficiencies = f"{result_dir}/mosaic/rgb"
-        )
-        
-        trees_seg = f"{result_dir}/mosaic/tiles_mask_trees"
-
-        self.main_window.page_map_trees.layers_ready.emit(mosaic_path, layers_path)
+        if os.path.exists(mosaic_path):
+            self.main_window.page_map_trees.layers_ready.emit(result_dir)
+            self.main_window.switch_page(2, True)
+        else:
+            self.main_window.switch_page(1, True)
 
     def open_analysis(self):
         path_dir = QFileDialog.getExistingDirectory(

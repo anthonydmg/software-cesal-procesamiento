@@ -411,6 +411,9 @@ class ImageSelectionScreen(QFrame):
             self.image_list.takeItem(self.image_list.row(item))
 
     def start_read_metadata(self):
+        print("Comenzando la lectura de metadatos..............")
+        self.next_button.setEnabled(False)
+        print()
         self.progress_bar.setVisible(True)
         self.progress_bar.setTextVisible(True)
         image_paths = [self.image_list.item(i).text() for i in range(self.image_list.count())]
@@ -436,6 +439,7 @@ class ImageSelectionScreen(QFrame):
 
         return None
     def on_all_metadata_ready(self, metadata_list):
+        self.next_button.setEnabled(True)
         for idx, metadata in enumerate(metadata_list):
             if metadata:
                 self.dialog_parent.new_analysis_data_store.add_image_data(idx, metadata)

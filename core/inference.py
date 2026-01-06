@@ -10,6 +10,8 @@ import cv2
 import json
 from tqdm import tqdm
 
+from core.utils import resource_path
+
 class Camara_M3M:
     fx = fy = 3713.29  # Distancia focal en píxeles
     cx = 7.02          # Centro óptico X (en píxeles, origen en el centro de la imagen)
@@ -102,7 +104,7 @@ class TreeDetectorYolo:
         return "cpu"
     
     def _load_model(self):
-        model = YOLO("./yolo11s-seg-finituned-2-split-1280.pt", task= 'segment')
+        model = YOLO(resource_path(os.path.join("assets", "models", "yolo11s-seg-finituned-2-split-1280.pt")), task= 'segment')
 
         return model
     

@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import exiftool
 import numpy as np
+import sys
 
 def detection_trees_human_ann(im_path, show = False):
     image_uav = cv2.imread(im_path)
@@ -181,3 +182,13 @@ def calculate_gps_for_pixel(pixel_coord ,gps_image, gsd_horizontal, gsd_vertical
     longitude_pixel = longitude_image + desp_long
     #print("latitud_pixel:", latitud_pixel, ", longitude_pixel:", longitude_pixel)
     return latitud_pixel, longitude_pixel
+
+def resource_path(relative_path):
+    """ Obtiene la ruta absoluta al recurso para PyInstaller """
+    try:
+        # PyInstaller crea una carpeta temporal en _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+
+    return os.path.join(base_path, relative_path)

@@ -1,7 +1,12 @@
-from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QGroupBox, QLabel, QGraphicsScene, QGraphicsView, QGraphicsPixmapItem, QToolButton, QFrame, QPushButton, QFileDialog, QRadioButton, QToolTip
-from PySide6.QtGui import QPalette, QColor, QPainter, QPixmap, QImage, QIcon
-from PySide6.QtGui import QFont
-from PySide6.QtCore import Qt, QRectF, Signal, QPoint, QEvent
+from PySide6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QGroupBox, 
+                               QLabel, QGraphicsScene, QGraphicsView, QGraphicsPixmapItem, 
+                               QToolButton, QFrame, QPushButton, QFileDialog, QRadioButton, 
+                               QToolTip, QDialog, QMessageBox, QSpacerItem, QSizePolicy,
+                               QLineEdit, QComboBox, QButtonGroup, QTextEdit, QCheckBox, QStackedWidget
+                               )
+from PySide6.QtGui import QLinearGradient, QPalette, QColor, QPainter, QPixmap, QImage, QIcon
+from PySide6.QtGui import QFont, QPen, QBrush
+from PySide6.QtCore import Qt, QRectF, Signal, QPoint, QEvent, QThread, Slot, QSize, QRect
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 import re
@@ -15,7 +20,10 @@ import json
 from datetime import datetime
 import cv2
 import copy
-from core.report_generator import ReportGenerator
+from core.report_generator import crear_reporte, EXAMPLE_DATOS_ARBOLES, EXAMPLE_MAP_IMAGE, EXAMPLE_COMENTARIOS
+import sys, time, tempfile, os, shutil, json
+
+from core.utils import resource_path
 
 class ColorTreeState:
     MAP = {
@@ -48,19 +56,23 @@ class ColorNdvi:
         color_green       = np.array([20, 80, 0], dtype=np.float32)
 
         color_scale = [
-            # --- RANGO 0.8 a 0.9 (Dividido en dos partes) ---
+            (-1.0, -0.6, np.array([0, 0, 0], dtype=np.float32),   np.array([0, 0, 251], dtype=np.float32)),   # black -> blue
+            (-0.6, 0.0, np.array([0, 0, 251], dtype=np.float32), np.array([220, 0, 251], dtype=np.float32)), # blue -> purple
+            (0.0, 0.5, np.array([220, 0, 251], dtype=np.float32), np.array([220, 0, 120], dtype=np.float32)), # purple -> pink
+            (0.5, 0.6, np.array([220, 0, 120], dtype=np.float32),  np.array([220, 100, 0], dtype=np.float32)), # pink -> dark orange
+            # --- RANGO 0.6 a 0.9 (Dividido en dos partes) ---
             # De 0.80 a 0.85: Naranja oscuro a Naranja suave
-            (0.80, 0.85, color_dark_orange, color_soft_orange),
+            (0.60, 0.70, color_dark_orange, color_soft_orange),
             
             # De 0.85 a 0.90: Naranja suave a Amarillo
-            (0.85, 0.90, color_soft_orange, color_yellow),
+            (0.70, 0.80, color_soft_orange, color_yellow),
 
             # --- RANGO 0.9 a 1.0 (Dividido en dos partes) ---
             # De 0.90 a 0.95: Amarillo a Verde Lima (hace que el 0.92 se vea muy distinto al 0.98)
-            (0.90, 0.95, color_yellow, color_lime),
+            (0.80, 0.85, color_yellow, color_lime),
             
             # De 0.95 a 1.00: Verde Lima a Verde Oscuro
-            (0.95, 1.00, color_lime, color_green),
+            (0.85, 1.00, color_lime, color_green),
         ]
 
         segments = [
@@ -82,7 +94,7 @@ class ColorNdvi:
         ]
 
         # Assign for each segment
-        for low, high, c_low, c_high in segments:
+        for low, high, c_low, c_high in color_scale:
             if ((ndvi_value >= low) & (ndvi_value < high)) or (high == 1.0 and ndvi_value >=1.0):
                 t = (ndvi_value - low) / (high - low)
             # Interpolate per-channel
@@ -90,6 +102,871 @@ class ColorNdvi:
                 return list(color)
         return [0, 0, 0]
 
+
+
+class LeyendaSaludWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        
+        # Layout principal (Vertical)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(5) # Espacio entre título y caja
+
+        # 1. Título "Leyenda" (Afuera de la caja, como tu foto)
+        lbl_titulo = QLabel("Leyenda")
+        lbl_titulo.setStyleSheet("font-weight: bold; font-size: 14px; color: #333333;")
+        layout.addWidget(lbl_titulo)
+
+        # 2. El contenedor (Caja con borde)
+        self.caja_contenedor = QFrame()
+        self.caja_contenedor.setStyleSheet("""
+            QFrame {
+                background-color: white;
+                border: 1px solid #CCCCCC;
+                border-radius: 5px;
+            }
+        """)
+        caja_layout = QVBoxLayout(self.caja_contenedor)
+        caja_layout.setContentsMargins(15, 15, 15, 15) # Margen interno para que no pegue al borde
+        
+        # 3. El Widget que dibuja la barra y textos
+        self.contenido_grafico = ContenidoLeyenda()
+        caja_layout.addWidget(self.contenido_grafico)
+
+        layout.addWidget(self.caja_contenedor)
+
+class ContenidoLeyenda(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # Definir tamaño mínimo obligatorio para que no se descuadre
+        self.setMinimumHeight(220) 
+        self.setMinimumWidth(200)
+
+        # Colores
+        self.c_green       = QColor(20, 80, 0)     # Verde Oscuro
+        self.c_medium_green = QColor(70, 140, 0)
+        self.c_lime        = QColor(120, 200, 0)   # Lima
+        self.c_yellow      = QColor(220, 240, 0)   # Amarillo
+        self.c_soft_orange = QColor(220, 170, 0)   # Naranja Suave
+        self.c_dark_orange = QColor(220, 100, 0)   # Naranja Oscuro
+
+        # Marcadores: (Valor, Color, Texto Principal)
+        self.markers = [
+            (1.00, self.c_green,       "MUY SALUDABLE (1.0)"),
+            (0.90, self.c_medium_green,      "SALUDABLE (0.9)"),
+            (0.80, self.c_lime, "ACEPTABLE (0.8)"),
+            (0.70, self.c_soft_orange, "DEFICIENTE (0.7)"),
+            (0.60, self.c_dark_orange, "BAJO (< 0.6)")
+        ]
+        
+        # Gradiente visual (Stops para QGradient)
+        self.gradient_stops = [
+            (0.00, self.c_green),
+            (0.20, self.c_medium_green),
+            (0.40, self.c_lime),
+            (0.60, self.c_yellow),
+            (0.70, self.c_soft_orange),
+            (1.00, self.c_dark_orange)
+        ]
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        # Geometría disponible
+        rect = self.rect()
+        w = rect.width()
+        h = rect.height()
+        
+        # Configuración de diseño
+        bar_width = 20        # Ancho de la barra de color
+        bar_x = 0             # Pegado a la izquierda del contenido
+        text_offset_x = 35    # Donde empieza el texto
+        
+        # 1. DIBUJAR LA BARRA DE COLOR VERTICAL
+        grad = QLinearGradient(bar_x, 0, bar_x, h) # De arriba a abajo
+        for stop, color in self.gradient_stops:
+            grad.setColorAt(stop, color)
+            
+        painter.setBrush(QBrush(grad))
+        painter.setPen(Qt.NoPen)
+        # Dibujamos un rectángulo redondeado para la barra
+        painter.drawRoundedRect(bar_x, 0, bar_width, h, 5, 5)
+
+        # 2. DIBUJAR LOS TEXTOS ALINEADOS
+        # Fuentes
+        font_main = QFont("Segoe UI", 9)
+        painter.setFont(font_main)
+        
+        # Rango matemático para calcular posiciones
+        max_val = 1.00
+        min_val = 0.60
+        span = max_val - min_val
+
+        for val, color, label in self.markers:
+            # Cálculo de posición Y (Invertido: 1.0 arriba, 0.6 abajo)
+            ratio = (max_val - val) / span
+            y_center = ratio * h
+            
+            # Corrección de bordes para que el texto no se corte arriba/abajo
+            # Mantenemos el texto dentro del área visible
+            y_center = max(10, min(h - 10, y_center))
+
+            # Dibujar línea conectora pequeña (opcional, ayuda a leer)
+            painter.setPen(QPen(QColor(200, 200, 200), 1))
+            painter.drawLine(bar_x + bar_width + 2, int(y_center), bar_x + bar_width + 8, int(y_center))
+
+            # Dibujar Texto
+            painter.setPen(QColor(50, 50, 50)) # Gris oscuro (más elegante que negro)
+            text_rect = QRect(text_offset_x, int(y_center) - 10, w - text_offset_x, 20)
+            painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter, label)
+
+    # Esto es CRUCIAL: Le dice al layout cuánto espacio necesita como mínimo
+    def sizeHint(self):
+        return QSize(200, 250)
+
+# ============================================================
+# WORKER: Generación del PDF (simulada con espera)
+# ============================================================
+class PdfGeneratorWorker(QThread):
+    finished = Signal(str, str)     # envía ruta del PDF temporal
+    failed = Signal(str)       # envía mensaje de error
+
+    def __init__(self, data: dict, parent=None):
+        super().__init__(parent)
+        self.data = data
+    
+    def load_trees_data(self, base_dir):
+        trees_results = []
+        
+        try:
+            path = f"{base_dir}/mosaic/trees/trees_results.json"
+            
+            with open(path, "r") as f:
+                trees_results = json.load(f)
+           
+        except Exception as e: 
+            print(e)
+        
+        trees_data = []
+        
+        for r in trees_results:
+            trees_data.append(dict(
+                id = r["id"], 
+                diagnostico = "POSIBLE DEFICIENCIA" if r['class'] == "deficiencia" else "SALUDABLE",
+                ndvi = round(r['avg_ndvi'], 2)
+                ))
+        
+        return trees_data
+    
+    def load_sumary_processing(self, base_dir):
+        try:
+            with open(f"{base_dir}/processing_sumary.json", "r") as f:
+                processing_sumary = json.load(f)
+                return processing_sumary
+        except Exception as e:
+            print(e)
+
+        return None
+    
+    def run(self):
+        try:
+            # Simulación de un proceso pesado
+            time.sleep(3)
+
+            
+            # Crear PDF vacío en carpeta temporal
+            temp_dir = tempfile.gettempdir()
+            temp_pdf = os.path.join(temp_dir, "reporte_temp.pdf")
+        #       self.data = {
+        #     "nombre_analisis": "Análisis Predeterminado 2024-07-26",
+        #     "solicitante": "",
+        #     "departamento": "",
+        #     "provincia": "Seleccionar Provincia",
+        #     "distrito": "Seleccionar Distrito",
+
+        #     # Opciones
+        #     "incl_area": False,
+        #     "incl_detalles": True,
+        #     "incl_fecha": False,
+        #     "incl_mapa": False,
+
+        #     # Formato
+        #     "formato": "A3",
+        #     # Comentarios
+        #     "comentarios": ""
+        # }
+
+            location = ""
+            
+            if self.data['departamento'] != "":
+                location = self.data['departamento']
+  
+            if self.data['provincia'] != "":
+                location = location + "/ " + self.data['provincia']
+
+            if self.data['distrito'] != "":
+                location = location + "/ " + self.data['distrito']
+
+            
+            general_info = [
+                    ("Nombre del Análisis:", self.data['nombre_analisis']),
+                    ("Nombre del Solicitante:", self.data['solicitante'] if self.data['solicitante'] != "" else "Anonimo"),
+                    ("Localidad:", location if location else "No se indica")
+                ]
+            
+
+            base_dir = self.data['base_dir']
+            
+            sumary_processing = self.load_sumary_processing(base_dir)
+            
+            if sumary_processing:
+                if self.data['incl_area']:
+                    general_info.append(("Area Apox. Terreno:", f'{round(sumary_processing["area_mosaic"],2)} ha'))
+
+                if self.data["incl_fecha"]:
+                    general_info.append(("Fecha de Adquisición:", sumary_processing["adquisition_date"]))
+                sumary_processing
+
+                if self.data['incl_detalles']:
+                    general_info.append(("Cantidad de Imágenes:", sumary_processing["total_images"]))
+                    general_info.append(("Modelo de Cámara:", "M3M"))
+                    general_info.append(("GSD Promedio:", round(sumary_processing["avg_gsd_multispec"],2)))
+                    general_info.append(("Altura de Vuelo Promedio:", str(round(sumary_processing["avg_alt"], 2))))
+            # EXAMPLE_GENERAL_INFO = [("Nombre del Análisis:", "Análisis de ejemplo 1"),
+            #         ("Nombre del Solicitante:", "Carlos Quispe"),
+            #         ("Localidad:", "Apurimac/ Abancay/ Pichirhua"),
+            #         ("Area Apox. Terreno:", "0.5 ha"),
+            #         ("Cantidad de Imágenes:", "331"), 
+            #         ("Modelo de Cámara:", "M3M"), 
+            #         ("GSD Promedio:", "0.5 cm/px"), 
+            #         ("Altura Promedio:", "14.92 m"), 
+            #         ("Fecha de Captura:", "2024-08-12")]
+           
+            trees_data = self.load_trees_data(base_dir)
+            crear_reporte(
+                filename = temp_pdf,
+                general_info= general_info,
+                trees_data= trees_data,
+                comments = self.data['comentarios'],
+                map_image= sumary_processing['map_trees'] if sumary_processing else None,
+                final_page_size = self.data["formato"] if self.data['incl_mapa'] else None)
+
+            #with open(temp_pdf, "wb") as f:
+            #    f.write(b"%PDF-1.4\n%EOF\n")  # PDF mínimo válido
+
+            self.finished.emit(temp_pdf, self.data["nombre_analisis"])
+
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
+class CustomCheckButton(QWidget):
+    toggled = Signal(bool)
+
+    def __init__(self, text="", parent=None):
+        super().__init__(parent)
+        self._checked = False
+        self.text = text
+
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumHeight(24)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+
+    # -----------------------------
+    # API pública
+    # -----------------------------
+    def isChecked(self):
+        return self._checked
+
+    def setChecked(self, value: bool):
+        if self._checked != value:
+            self._checked = value
+            self.toggled.emit(self._checked)
+            self.update()
+
+    def toggle(self):
+        self.setChecked(not self._checked)
+
+    # -----------------------------
+    # Eventos
+    # -----------------------------
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.toggle()
+
+    def enterEvent(self, event):
+        self.update()
+
+    def leaveEvent(self, event):
+        self.update()
+
+    # -----------------------------
+    # Renderizado
+    # -----------------------------
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHints(QPainter.Antialiasing)
+
+        rect = self.rect()
+        box_size = 20
+        x = 4
+        y = (rect.height() - box_size) // 2
+
+        # Hover
+        if self.underMouse():
+            painter.fillRect(rect, QColor(0, 0, 0, 8))
+
+        # Caja exterior
+        pen = QPen(QColor(80, 80, 80), 1.8)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+
+        r = QRectF(x, y, box_size, box_size)
+        painter.drawRoundedRect(r, 4, 4)
+
+        # Check interno
+        if self._checked:
+            painter.setBrush(QBrush(QColor(0, 50, 150))) #QColor(40, 160, 90)
+            painter.setPen(Qt.NoPen)
+            painter.drawRoundedRect(QRectF(x + 4, y + 4, box_size - 8, box_size - 8), 3, 3)
+
+        # Texto
+        painter.setPen(QColor(30, 30, 30))
+        painter.setFont(QFont("Segoe UI", 10))
+
+        painter.drawText(
+            box_size + 12,
+            0,
+            rect.width() - box_size - 12,
+            rect.height(),
+            Qt.AlignVCenter | Qt.AlignLeft,
+            self.text
+        )
+
+    def sizeHint(self):
+        return QSize(150, 28)
+
+class ReportDialog(QDialog):
+    def __init__(self, parent=None, base_dir = None, name_analysis = "Análisis Predeterminado 2024-07-26"):
+        super().__init__(parent)
+        self.parent = parent
+        self.base_dir = base_dir
+        #self.setStyleSheet("background: yellow;")
+        # =====================================================
+        #  DICT DE VALORES (CON VALORES POR DEFECTO)
+        # =====================================================
+
+        
+        #processing_sumary = self.load_sumary_processing(base_dir)
+        
+        self.data = {
+            "nombre_analisis": name_analysis,
+            "solicitante": "",
+            "departamento": "",
+            "provincia": "Seleccionar Provincia",
+            "distrito": "Seleccionar Distrito",
+
+            # Opciones
+            "incl_area": False,
+            "incl_detalles": True,
+            "incl_fecha": False,
+            "incl_mapa": False,
+
+            # Formato
+            "formato": "A3",
+            # Comentarios
+            "comentarios": "",
+            #"mapa": processing_sumary['map_trees'],
+            "base_dir": base_dir
+        }
+
+        self.setWindowTitle("Generar Reporte")
+        
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint | Qt.WindowSystemMenuHint)
+        #self.setWindowModality(Qt.ApplicationModal)
+        self.setMinimumWidth(700)
+        self.setStyleSheet(self.dialog_stylesheet())
+
+        # Referencias a widgets
+        self.widgets = {}
+        
+        self.init_ui()
+
+        if parent:
+            self.center_over_parent()
+
+
+    def load_sumary_processing(self, base_dir):
+        with open(f"{base_dir}/processing_sumary.json", "r") as f:
+            processing_sumary = json.load(f)
+            return processing_sumary
+        
+        return None
+    # ============================================================
+    # CENTRAR
+    # ============================================================
+    def center_over_parent(self):
+        parent_geo = self.parent.geometry()
+        x = parent_geo.x() + (parent_geo.width() - self.width()) // 2 
+        y = parent_geo.y() + (parent_geo.height() - self.height()) // 2 - 600 // 2
+        self.move(max(0, x), max(0, y))
+
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            return super().mousePressEvent(event)
+
+        # posición local (coord de widget)
+        local_pos = event.position().toPoint()
+
+        # widget bajo el cursor
+        w = self.childAt(local_pos)
+
+        # recorrer hacia arriba para ver si clic fue dentro de un control interactivo
+        interactive_types = (QCheckBox, QLineEdit, QComboBox, QTextEdit, QPushButton, CustomCheckButton)
+        while w is not None and w is not self:
+            if isinstance(w, interactive_types):
+                # dejar que el control procese el evento
+                return super().mousePressEvent(event)
+            w = w.parentWidget()
+
+        # Si llegamos aquí: no fue sobre un control interactivo → iniciar drag
+        self._dragging = True
+        self._drag_pos = event.globalPosition().toPoint()
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        if getattr(self, "_dragging", False):
+            new_pos = self.pos() + (event.globalPosition().toPoint() - self._drag_pos)
+            self.move(new_pos)
+            self._drag_pos = event.globalPosition().toPoint()
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        # terminar arrastre
+        self._dragging = False
+        super().mouseReleaseEvent(event)
+        
+    # ============================================================
+    # DRAG DEL DIALOGO
+    # ============================================================
+    # def mousePressEvent(self, event):
+    #     if event.button() == Qt.LeftButton:
+    #         self.drag_pos = event.globalPosition().toPoint()
+
+    # def mouseMoveEvent(self, event):
+    #     if event.buttons() & Qt.LeftButton:
+    #         diff = event.globalPosition().toPoint() - self.drag_pos
+    #         self.move(self.pos() + diff)
+    #         self.drag_pos = event.globalPosition().toPoint()
+
+    # ============================================================
+    # UI
+    # ============================================================
+    def init_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(24, 24, 24, 24)
+        self.department = None
+        # Header
+        header = QHBoxLayout()
+        title = QLabel("Generar Reporte")
+        title.setObjectName("title")
+        header.addWidget(title)
+        header.addStretch()
+        btn_close = QPushButton("✕")
+        btn_close.setObjectName("closeButton")
+        btn_close.setFixedSize(28, 28)
+        btn_close.clicked.connect(self.reject)
+        header.addWidget(btn_close)
+        main_layout.addLayout(header)
+        main_layout.addSpacing(8)
+
+        # Form area
+        form_area = QVBoxLayout()
+        # ---------------------------
+        # NOMBRE DEL ANALISIS
+        # ---------------------------
+        form_area.addWidget(
+            self.labeled_lineedit("nombre_analisis", "Nombre de Análisis",
+                                  self.data["nombre_analisis"])
+        )
+
+        
+        # Row: Nombre solicitante | Departamento
+        row1 = QHBoxLayout()
+        row1.addWidget(self.labeled_lineedit("solicitante", "Nombre del Solicitante"))
+        row1.addSpacing(12)
+        departamentos = self.load_departementos()
+
+        row1.addWidget(self.depertamentos_combobox("departamento", "Departamento", ["Seleccionar Departamento"] + departamentos))#self.labeled_lineedit("departamento", "Departamento"))
+        form_area.addLayout(row1)
+        form_area.addSpacing(8)
+
+        # Row: Provincia | Distrito
+        row2 = QHBoxLayout()
+        row2.addWidget(self.provincias_combobox("provincia", "Provincia", ["Seleccionar Provincia"]))
+        row2.addSpacing(12)
+        row2.addWidget(self.distritos_combobox("distrito", "Distrito", ["Seleccionar Distrito"]))
+        form_area.addLayout(row2)
+        form_area.addSpacing(12)
+
+        options_layout = QVBoxLayout()
+
+        label_opciones = QLabel("Opciones")
+        label_opciones.setStyleSheet("font-weight: bold; font-size: 14px; margin-bottom: 4px;")
+        options_layout.addWidget(label_opciones)
+
+        self.widgets["incl_area"] = CustomCheckButton("Incluir área aproximada del terreno")
+        self.widgets["incl_detalles"] = CustomCheckButton("Incluir detalles de la adquisición de imágenes")
+        self.widgets["incl_fecha"] = CustomCheckButton("Incluir fecha de adquisición")
+        self.widgets["incl_mapa"] = CustomCheckButton("Incluir mapa para imprimir")
+
+        # Valor por defecto
+        self.widgets["incl_detalles"].setChecked(True)
+
+        # Conectar señales
+        self.widgets["incl_area"].toggled.connect(lambda v: self.update_dict("incl_area", v))
+        self.widgets["incl_detalles"].toggled.connect(lambda v: self.update_dict("incl_detalles", v))
+        self.widgets["incl_fecha"].toggled.connect(lambda v: self.update_dict("incl_fecha", v))
+        self.widgets["incl_mapa"].toggled.connect(lambda v: self.change_incl_last_mapa("incl_mapa", v))
+
+        # Agregar los QCheckBox directamente
+        options_layout.addWidget(self.widgets["incl_area"])
+        options_layout.addWidget(self.widgets["incl_detalles"])
+        options_layout.addWidget(self.widgets["incl_fecha"])
+        options_layout.addWidget(self.widgets["incl_mapa"])
+
+        # Añadir al form_area
+        form_area.addLayout(options_layout)
+        form_area.addSpacing(8)
+
+        # ---------------------------
+        # FORMATO
+        # ---------------------------
+        format_row = QHBoxLayout()
+        format_row.addWidget(QLabel("Formato:"))
+        self.rb_a4 = QRadioButton("A4")
+        self.rb_a3 = QRadioButton("A3")
+        
+        self.rb_a3.setChecked(True)
+
+        format_group = QButtonGroup(self)
+        format_group.addButton(self.rb_a4)
+        format_group.addButton(self.rb_a3)
+
+        self.rb_a4.toggled.connect(lambda v: self.update_dict("formato", "A4" if v else self.data["formato"]))
+        self.rb_a3.toggled.connect(lambda v: self.update_dict("formato", "A3" if v else self.data["formato"]))
+        
+        self.rb_a3.setEnabled(False)
+        self.rb_a4.setEnabled(False)
+
+        format_row.addWidget(self.rb_a4)
+        format_row.addWidget(self.rb_a3)
+        format_row.addStretch()
+        form_area.addLayout(format_row)
+        form_area.addSpacing(12)
+        
+        # ---------------------------
+        # COMENTARIOS
+        # ---------------------------
+        form_area.addWidget(
+            self.labeled_textedit("comentarios", "Incluir Comentarios o Sugerencias")
+        )
+
+        main_layout.addLayout(form_area)
+        main_layout.addSpacing(12)
+
+        # ---------------------------
+        # FOOTER
+        # ---------------------------
+        footer = QHBoxLayout()
+        footer.addStretch()
+        self.btn_cancel = QPushButton("Cancelar")
+        self.btn_cancel.setObjectName("btnCancel")
+        self.btn_cancel.setFixedHeight(36)
+        self.btn_cancel.clicked.connect(self.reject)
+
+        self.btn_generate = QPushButton("Generar PDF")
+        self.btn_generate.setObjectName("btnGenerate")
+        self.btn_generate.setFixedHeight(36)
+        self.btn_generate.clicked.connect(self.on_generate_clicked)
+
+        footer.addWidget(self.btn_cancel)
+        footer.addSpacing(8)
+        footer.addWidget(self.btn_generate)
+        main_layout.addLayout(footer)
+
+    def change_incl_last_mapa(self, key, v):
+        print("change_incl_last_mapa v:", v)
+        if v:
+            self.rb_a3.setEnabled(True)
+            self.rb_a4.setEnabled(True)
+        else:
+            self.rb_a3.setEnabled(False)
+            self.rb_a4.setEnabled(False)
+        
+        self.update_dict(key, v)
+
+
+    def load_departementos(self):
+        departamentos = []
+        with open(resource_path(os.path.join("assets", "departamentos.json")), "r", encoding="utf-8") as f:
+            departamentos = json.load(f)
+            departamentos = departamentos['departamentos']
+        return departamentos
+    
+    def load_provincias(self):
+        provincias = []
+        with open(resource_path(os.path.join("assets", "provincias.json")), "r", encoding="utf-8") as f:
+            provincias = json.load(f)
+        return provincias
+    
+    def load_distritos(self, departamento):
+        distritos = None
+        if departamento is None:
+            return distritos
+        path = resource_path(os.path.join("assets", f"distritos_{departamento.lower()}.json")) 
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                distritos = json.load(f)
+        return distritos
+    
+    @Slot(str)
+    def on_pdf_ready(self, temp_pdf_path, name_analisys):
+        # Restaurar botón
+        self.btn_generate.setEnabled(True)
+        self.btn_cancel.setEnabled(True)
+        self.btn_generate.setText("Generar PDF")
+
+        # Abrir dialog de Guardar
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Guardar Reporte",
+            f"{name_analisys}.pdf",
+            "PDF (*.pdf)"
+        )
+
+        if not file_path:
+            os.remove(temp_pdf_path)
+            return
+
+        shutil.move(temp_pdf_path, file_path)
+
+        QMessageBox.information(self, "Éxito", "Reporte guardado correctamente.")
+
+        self.accept()
+
+    # ============================================================
+    # FACTORÍAS DE WIDGETS
+    # ============================================================
+    def labeled_lineedit(self, key, label_text, placeholder=""):
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        
+        layout.setContentsMargins(0, 0, 0, 0)
+        lbl = QLabel(label_text)
+        le = QLineEdit()
+        le.setText(placeholder)
+        le.textChanged.connect(lambda v: self.update_dict(key, v))
+        le.setFixedHeight(30)
+
+        self.widgets[key] = le
+        layout.addWidget(lbl)
+        layout.addWidget(le)
+        return container
+
+    def depertamentos_combobox(self, key, label_text, items):
+        def update_provincias(key, v):
+                provincias = self.load_provincias()
+                self.department = v
+                nuevos_items = provincias[v]
+                self.pv_cb.clear()
+                self.pv_cb.addItems(["Seleccionar Provincia"] + nuevos_items)
+                self.update_dict(key, v)
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        lbl = QLabel(label_text)
+        
+        self.dp_cb = QComboBox()
+        self.dp_cb.addItems(items)
+        self.dp_cb.currentTextChanged.connect(lambda v: update_provincias(key, v))
+        self.dp_cb.setFixedHeight(30)
+
+        self.widgets[key] = self.dp_cb
+        layout.addWidget(lbl)
+        layout.addWidget(self.dp_cb)
+        return container
+
+    def provincias_combobox(self, key, label_text, items):
+        def update_distritos(key, v):
+            distritos = self.load_distritos(self.department)
+            if distritos is not None:
+                if v!= '' and v != 'Seleccionar Provincia':
+                    nuevos_items = distritos[v]
+                    self.dt_cb.clear()
+                    self.dt_cb.addItems(["Seleccionar Distrito"] + nuevos_items)
+            self.update_dict(key, v)
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        lbl = QLabel(label_text)
+        
+        self.pv_cb = QComboBox()
+        self.pv_cb.addItems(items)
+        self.pv_cb.currentTextChanged.connect(lambda v: update_distritos(key, v))
+        self.pv_cb.setFixedHeight(30)
+
+        self.widgets[key] = self.pv_cb
+        layout.addWidget(lbl)
+        layout.addWidget(self.pv_cb)
+        return container
+    
+    def distritos_combobox(self, key, label_text, items):
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        lbl = QLabel(label_text)
+        
+        self.dt_cb = QComboBox()
+        self.dt_cb.addItems(items)
+        self.dt_cb.currentTextChanged.connect(lambda v: self.update_dict(key, v))
+        self.dt_cb.setFixedHeight(30)
+
+        self.widgets[key] = self.dt_cb
+        layout.addWidget(lbl)
+        layout.addWidget(self.dt_cb)
+        return container
+
+    def labeled_combobox(self, key, label_text, items):
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        lbl = QLabel(label_text)
+        cb = QComboBox()
+        cb.addItems(items)
+            
+        cb.currentTextChanged.connect(lambda v: self.update_dict(key, v))
+        cb.setFixedHeight(30)
+
+        self.widgets[key] = cb
+        layout.addWidget(lbl)
+        layout.addWidget(cb)
+        return container
+
+    def labeled_textedit(self, key, label_text):
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        lbl = QLabel(label_text)
+        te = QTextEdit()
+        te.textChanged.connect(lambda: self.update_dict(key, te.toPlainText()))
+        te.setFixedHeight(120)
+
+        self.widgets[key] = te
+        layout.addWidget(lbl)
+        layout.addWidget(te)
+        return container
+
+    def on_generate_clicked(self):
+        # 1) Recolectar datos del UI → dict
+        #self.collect_data()
+        
+        #self.data
+        
+        # 2) Desactivar botones
+        self.btn_generate.setEnabled(False)
+        self.btn_cancel.setEnabled(False)
+
+        # 3) Mostrar spinner (texto simple)
+        self.btn_generate.setText("Procesando...")
+
+        # 4) Lanzar worker
+        self.worker = PdfGeneratorWorker(self.data)
+        self.worker.finished.connect(self.on_pdf_ready)
+        self.worker.failed.connect(self.on_pdf_error)
+        self.worker.start()
+
+
+    @Slot(str)
+    def on_pdf_error(self, msg):
+        QMessageBox.critical(self, "Error", f"No se pudo generar el reporte:\n{msg}")
+        self.btn_generate.setEnabled(True)
+        self.btn_cancel.setEnabled(True)
+        self.btn_generate.setText("Generar PDF")
+
+    # ============================================================
+    # ACTUALIZAR DICCIONARIO
+    # ============================================================
+    def update_dict(self, key, value):
+        self.data[key] = value
+        # print(self.data)  # Debug opcional
+
+    # ============================================================
+    # BOTÓN GENERAR
+    # ============================================================
+    def on_generate(self):
+        print("=== VALORES DEL DIALOGO ===")
+        print(self.data)
+        print("===========================")
+        self.accept()
+
+    # ============================================================
+    # STYLE
+    # ============================================================
+    def dialog_stylesheet(self):
+        return """
+        QDialog {
+            background: #ffffff;
+            border-radius: 8px;
+        }
+        #title {
+            font-size: 18px;
+            font-weight: 700;
+        }
+        QLabel {
+            color: #222;
+            font-size: 12px;
+        }
+        QLineEdit, QComboBox, QTextEdit {
+            border: 1px solid #e5e5e5;
+            border-radius: 6px;
+            padding: 6px;
+            background: #fff;
+        }
+        QGroupBox {
+            border: none;
+        }
+        QPushButton#btnCancel {
+            background: #efefef;
+            border: 1px solid #dfdfdf;
+            border-radius: 8px;
+            padding-left: 12px;
+            padding-right: 12px;
+        }
+        QPushButton#btnCancel:hover { background: #e6e6e6; }
+        QPushButton#btnGenerate {
+            background: #00c853;
+            color: white;
+            border-radius: 8px;
+            padding-left: 16px;
+            padding-right: 16px;
+        }
+        QPushButton#btnGenerate:hover { background: #00b24a; }
+        QPushButton#closeButton {
+            background: transparent;
+            border: none;
+            font-size: 14px;
+        }
+        """
+    
+    
 class MapGraphicsView(QGraphicsView):
     def __init__(self, scene, parent = None):
         super().__init__(parent)
@@ -154,7 +1031,6 @@ class GeoTIFFViewer(QWidget):
             self.update_layers_map(layers_base_dir)
             self.show_mosaic_rgb()
     
-
     def init_ui(self):
         """Inicializa la interfaz del widget"""
         self.layout = QVBoxLayout(self)
@@ -211,7 +1087,7 @@ class GeoTIFFViewer(QWidget):
         self.floating_tooltip = FloatingToolTip(self.view.viewport())
         self.zoom_in_btn = QToolButton(self)
         self.zoom_in_btn.setFixedSize(30, 30)
-        self.zoom_in_btn.setIcon(QIcon("./assets/zoom_in.svg"))
+        self.zoom_in_btn.setIcon(QIcon(resource_path(os.path.join("assets", "zoom_in.svg"))))
         self.zoom_in_btn.setStyleSheet("""
             QToolButton {
                 background-color: white;
@@ -226,7 +1102,7 @@ class GeoTIFFViewer(QWidget):
 
         self.zoom_out_btn = QToolButton(self)
         self.zoom_out_btn.setFixedSize(30, 30)
-        self.zoom_out_btn.setIcon(QIcon("./assets/zoom_out.svg"))
+        self.zoom_out_btn.setIcon(QIcon(resource_path(os.path.join("assets", "zoom_out.svg"))))
         
         self.zoom_out_btn.setStyleSheet("""
             QToolButton {
@@ -241,7 +1117,7 @@ class GeoTIFFViewer(QWidget):
         
         self.layers_btn = QToolButton(self)
         self.layers_btn.setFixedSize(30, 30)
-        self.layers_btn.setIcon(QIcon("./assets/layers.svg"))
+        self.layers_btn.setIcon(QIcon(resource_path(os.path.join("assets", "layers.svg"))))
 
         self.layers_btn.setStyleSheet("""
             QToolButton {
@@ -275,7 +1151,7 @@ class GeoTIFFViewer(QWidget):
 
         layout_layers = QVBoxLayout(self.layers_menu)
 
-        self.rb_ndvi = QRadioButton("MAPA NDVI")
+        #self.rb_ndvi = QRadioButton("MAPA NDVI")
         self.rb_mapa = QRadioButton("MAPA")
         self.rb_def = QRadioButton("MAPA DE DEFICIENCIAS")
         self.rb_ndvi_avg = QRadioButton("MAPA NDVI PROMEDIO")
@@ -288,13 +1164,13 @@ class GeoTIFFViewer(QWidget):
         # Por defecto MAPA seleccionado
         self.rb_mapa.setChecked(True)
         layout_layers.addWidget(self.rb_mapa)
-        layout_layers.addWidget(self.rb_ndvi)
+        #layout_layers.addWidget(self.rb_ndvi)
         layout_layers.addWidget(self.rb_def)
         layout_layers.addWidget(self.rb_ndvi_avg)
 
 
         # Conectar cambios de radio
-        self.rb_ndvi.toggled.connect(lambda: self.show_mosaic_ndvi())
+        #self.rb_ndvi.toggled.connect(lambda: self.show_mosaic_ndvi())
         self.rb_mapa.toggled.connect(lambda: self.show_mosaic_rgb())
         self.rb_def.toggled.connect(lambda: self.show_deficients_map())
         self.rb_ndvi_avg.toggled.connect(lambda: self.show_avg_ndvi_masks())
@@ -399,6 +1275,7 @@ class GeoTIFFViewer(QWidget):
         
         for trees_r in trees_results:
             mask_path = trees_r['mask_path']
+            print("mask_path:", mask_path)
             mask_file = os.path.basename(mask_path) 
            
             match = re.search(r"tree_(\d+)_(\d+)\.png", mask_file)
@@ -408,6 +1285,10 @@ class GeoTIFFViewer(QWidget):
             x_pos, y_pos = map(int, match.groups())
             
             mask = cv2.imread(mask_path)
+            
+            if mask is None:
+                continue
+
             mask = mask.astype(np.uint8)
             
             if mask.ndim == 3 and mask.shape[-1] > 1:
@@ -584,6 +1465,8 @@ class GeoTIFFViewer(QWidget):
     def showEvent(self, event):
         """Ajusta la vista al tamaño inicial de la ventana cuando se muestra por primera vez."""
         super().showEvent(event)
+        print("Mostrar Mosaico.......")
+        print()
         spacing = 10
         self.zoom_out_btn.move(30, self.height() - self.zoom_out_btn.height() - 30)
         self.zoom_in_btn.move(30, self.zoom_out_btn.y() - self.zoom_in_btn.height() - spacing)
@@ -600,24 +1483,27 @@ class GeoTIFFViewer(QWidget):
        
         # Cargar Mosiaco RGB
         mosaic_rgb = f"{layers_base_dir}/mosaic/rgb/tiles"
-        self.rgb_items = self.load_tiles(mosaic_rgb)
+        if os.path.isdir(mosaic_rgb):
+            self.rgb_items = self.load_tiles(mosaic_rgb)
 
         # Cargar Mosiaco NDVI
         mosaic_ndvi = f"{layers_base_dir}/mosaic/ndvi/tiles"
-        self.ndvi_items = self.load_tiles(mosaic_ndvi, z_value=1)
+        if os.path.isdir(mosaic_ndvi):
+            self.ndvi_items = self.load_tiles(mosaic_ndvi, z_value=1)
 
         # Cargar Mascaras de Arboles con Calificaciones
 
         trees_result_file = f"{layers_base_dir}/mosaic/trees/trees_results.json"
 
-        trees_results = self.read_trees_results(trees_result_file)
+        if os.path.exists(trees_result_file):
+            trees_results = self.read_trees_results(trees_result_file)
 
-        self.trees_masks_items = self.load_trees_masks(trees_results, z_value = 2)
+            self.trees_masks_items = self.load_trees_masks(trees_results, z_value = 2)
 
-        # Inicializar hover de las mascaras
-        self.trees_mask_hover = trees_results
+            # Inicializar hover de las mascaras
+            self.trees_mask_hover = trees_results
 
-        self.avg_ndvi_masks_items = self.load_trees_ndvi_avg(trees_results, z_value = 4)
+            self.avg_ndvi_masks_items = self.load_trees_ndvi_avg(trees_results, z_value = 4)
         
     
     def contains_masks(self, pos_scene, mask_hover):
@@ -709,6 +1595,8 @@ class GeoTIFFViewer(QWidget):
 
     def show_mosaic_rgb(self):
         
+        self.on_selected_layer("rgb")
+
         for item in self.rgb_items:
             item.setVisible(True)
         
@@ -722,7 +1610,7 @@ class GeoTIFFViewer(QWidget):
             item.setVisible(False)
 
     def show_mosaic_ndvi(self):
-        
+        self.on_selected_layer("ndvi")
         for item in self.rgb_items:
             item.setVisible(False)
         
@@ -737,7 +1625,7 @@ class GeoTIFFViewer(QWidget):
     
 
     def show_deficients_map(self):
-    
+        self.on_selected_layer("deficient_map")
         for item in self.rgb_items:
             item.setVisible(True)
         
@@ -753,6 +1641,7 @@ class GeoTIFFViewer(QWidget):
         #return super().show()
 
     def show_avg_ndvi_masks(self):
+        self.on_selected_layer("avg_ndvi")
         for item in self.rgb_items:
             item.setVisible(True)
         
@@ -837,16 +1726,17 @@ class LegendWidget(QWidget):
         group_layout.setContentsMargins(10, 10, 40, 10)
         group_layout.setSpacing(12)
 
-        leyend_data = [
-            ("#00FF32", "Saludable"),
-            ("#F49632", "Deficiencia Nutricional"),
-            ("#00B6FF", "Exceso Nutricional")
-        ]
+        leyend_colors = [{
+            "name": "SALUDABLE", 
+            "color_hex": "#00FF32", 
+            "color_rgb": [0, 255, 50]
+        }, 
+        {
+            "name": "DEFICIENCIA", 
+            "color_hex": "#BFF700", 
+            "color_rgb": [191, 247, 0]
+        }]
         
-        with open("./mosaicos/output_layers/leyend_colors_2.json", "r") as f:
-            leyend_colors = json.load(f)
-            print("leyend_colors:", leyend_colors)
-            
         for leyend in leyend_colors:
             group_layout.addWidget(LegendItem(leyend['color_hex'], leyend['name'].replace("_", " ")))
 
@@ -873,7 +1763,7 @@ class MosaicView(QWidget):
         self.setLayout(layout)
          # Crear instancia del visualizador
         self.viewer = GeoTIFFViewer(
-            layers_base_dir="./analisis/prueba-biochumbi-150-oct-test",
+            layers_base_dir= None, #"./analisis/prueba-biochumbi-150-oct-test",
             parent=self
         )
         
@@ -884,6 +1774,7 @@ class MosaicView(QWidget):
 
     def update_layers_map(self, layers_base_dir):
         self.viewer.update_layers_map(layers_base_dir)
+        self.viewer.show_mosaic_rgb()
 
 class TitleResults(QWidget):
     def __init__(self, name_analysis):
@@ -993,17 +1884,20 @@ class StatCard(QFrame):
         lbl_title.setStyleSheet("color: #0A281A;")
 
         # Valor
-        lbl_value = QLabel(str(value))
-        lbl_value.setAlignment(Qt.AlignCenter)
-        lbl_value.setFont(QFont("Segoe UI", 34, QFont.Bold))
-        lbl_value.setStyleSheet("color: #0A281A;")
+        self.lbl_value = QLabel(str(value))
+        self.lbl_value.setAlignment(Qt.AlignCenter)
+        self.lbl_value.setFont(QFont("Segoe UI", 34, QFont.Bold))
+        self.lbl_value.setStyleSheet("color: #0A281A;")
 
         # Layout
         layout = QVBoxLayout(self)
         layout.addWidget(lbl_title)
-        layout.addWidget(lbl_value)
+        layout.addWidget(self.lbl_value)
         layout.setContentsMargins(20, 15, 20, 15)
-
+    
+    def update_count(self, num_trees = 0):
+        self.lbl_value.setText(str(num_trees))
+        
 
 class DonutChartWidget(QWidget):
     def __init__(self, healthy=65, deficient=35, parent=None):
@@ -1011,8 +1905,9 @@ class DonutChartWidget(QWidget):
 
         self.healthy = healthy
         self.deficient = deficient
-        self.percentage_healthy = round(healthy * 100 / (healthy + deficient), 1) 
-        self.percentage_deficient = round(deficient * 100 / (healthy + deficient),1) 
+        total = max((healthy + deficient),1)
+        self.percentage_healthy = round(healthy * 100 / total, 1) 
+        self.percentage_deficient = round(deficient * 100 / total, 1) 
 
         # Para una mejor calidad en pantallas HiDPI
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -1116,16 +2011,16 @@ class DonutChartWidget(QWidget):
         self.update()
 
 class RightPanelResults(QWidget):
-    def __init__(self, name_analysis, diagram_path, main_window):
+    def __init__(self, name_analysis, result_dir, main_window):
         super().__init__()
 
         self.main_window = main_window
-        
+        self.result_dir = result_dir
         container = QWidget()
         container_layout = QVBoxLayout()
         container_layout.setContentsMargins(0, 0, 0, 0)  # sin márgenes laterales
         container_layout.setSpacing(0)
-        
+        self.name_analysis = name_analysis
         # Espaciador arriba (por ejemplo, 20px)
         container_layout.addSpacing(30)
 
@@ -1133,25 +2028,28 @@ class RightPanelResults(QWidget):
         container_layout.addWidget(self.title_results)
         container_layout.addSpacing(15)
 
-        layers_base_dir="./analisis/prueba-biochumbi-150-oct-test"
-        trees_results_path = f"{layers_base_dir}/mosaic/trees/trees_results.json"
-
-        with open(trees_results_path, "r") as f:
-            trees_result = json.load(f)
-
-        sal_trees = [ r for r in trees_result if r['class'] == "saludable"]
-        def_trees = [ r for r in trees_result if r['class'] == "deficiencia"]
         ## Diagrama
-        count_trees_card = StatCard("Total de Arboles Detectados", len(trees_result))
-        diagram_widget = DonutChartWidget(healthy=len(sal_trees), deficient=len(def_trees)) # 
+        self.count_trees_card = StatCard("Total de Arboles Detectados", 0)
+        self.diagram_widget = DonutChartWidget(healthy=10, deficient=10) # 
         
-        #diagram_widget = DiagramWidget("Distribucion de  arboles con deficiencias nutricionales", diagram_path)
-        container_layout.addWidget(count_trees_card)
-        container_layout.addWidget(diagram_widget)
-        legend_widget = LegendWidget()
-        container_layout.addWidget(legend_widget)
-        report_button = QPushButton("  Generar Reporte")
-        report_button.setIcon(QIcon("./assets/file.svg"))
+        if result_dir:
+            self.result_dir = result_dir
+            self.update_view(self, result_dir)
+        
+        container_layout.addWidget(self.count_trees_card)
+        container_layout.addWidget(self.diagram_widget)
+        self.stack_leyends = QStackedWidget()
+        self.legend_widget = LegendWidget() 
+        self.leyend_ndvi = LeyendaSaludWidget()
+
+        # 4Añadir tus widgets al Stack
+        self.stack_leyends.addWidget(self.legend_widget)  # Índice 0
+        self.stack_leyends.addWidget(self.leyend_ndvi)     # Índice 1
+        self.stack_leyends.setCurrentIndex(0)
+        
+        container_layout.addWidget(self.stack_leyends)
+        report_button = QPushButton("Generar Reporte")
+        report_button.setIcon(QIcon(resource_path(os.path.join("assets", "file.svg"))))
 
         report_button.clicked.connect(self.generate_report)
         
@@ -1174,7 +2072,7 @@ class RightPanelResults(QWidget):
         """)
 
         export_button = QPushButton("  Exportar Resultados")
-        export_button.setIcon(QIcon("./assets/file.svg"))
+        export_button.setIcon(QIcon(resource_path(os.path.join("assets", "file.svg"))))
         
         export_button.setStyleSheet("""
             QPushButton {
@@ -1204,37 +2102,55 @@ class RightPanelResults(QWidget):
         layout.addWidget(container, 0, Qt.AlignTop)
         self.setLayout(layout)
 
+    def change_leyend(self, index):
+        self.stack_leyends.setCurrentIndex(index)
+
+    def update_view(self, result_dir):
+        print("Actualizar Rigth Panel......")
+        self.result_dir = result_dir
+
+        trees_results_path = f"{result_dir}/mosaic/trees/trees_results.json"
+
+        sal_trees = []
+        def_trees = []
+        trees_result = []
+
+        if os.path.exists(trees_results_path):
+            with open(trees_results_path, "r") as f:
+                trees_result = json.load(f)
+
+            sal_trees = [ r for r in trees_result if r['class'] == "saludable"]
+            def_trees = [ r for r in trees_result if r['class'] == "deficiencia"]
+
+            self.count_trees_card.update_count(len(trees_result))
+            self.diagram_widget.update_values(healthy = len(sal_trees), deficient = len(def_trees))
+
     def update_title(self, title):
+        self.name_analysis = title
         self.title_results.update_title(title)
     
     def showEvent(self, event):
         super().showEvent(event)
+        print("Mostra Right panel 1..........")
+        print()
         name = self.main_window.analysis_data_store.name
-
-        print("name:", name)
 
         if name is None:
             name =  "Análisis Ejemplo 1"
+        
         self.update_title(name)
+        
+        base_dir = self.main_window.analysis_data_store.base_dir
+
+        if base_dir is not None:
+            self.update_view(base_dir)
 
     def generate_report(self):
-        date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        base_dir = self.analysis_data_store.base_dir
-        print("base_dir:", base_dir)
-        pdf_file = f"{base_dir}/RESULTADOS_{date_str}.pdf"
-        
-        report_generator = ReportGenerator()
-
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Guardar archivo PDF",
-            pdf_file,
-            "Archivos PDF (*.pdf)"
-        )
-        print("Path:", path)
-
-        report_generator.create_report(path)
-        
+        dialog = ReportDialog(self.main_window, self.result_dir, self.name_analysis)
+        result = dialog.exec()
+        if result == QDialog.Accepted:
+            print("Datos recibidos del reporte:")
+            print(dialog.data)
 
 class MapTreeScreen(QWidget):
     layers_ready = Signal(str)
@@ -1244,7 +2160,7 @@ class MapTreeScreen(QWidget):
         super().__init__()
         self.main_window = main_window
         self.current_layer = "RGB"
-        self.layers_path = dict()
+        self.layers_path = None
         self.setup_ui()
 
     def setup_ui(self):
@@ -1262,12 +2178,12 @@ class MapTreeScreen(QWidget):
 
         self.mosaic_view = MosaicView(self.main_window)
         
-        self.mosaic_view.viewer.layer_selected.connect(self.update_mosaic)
-        #self.analysis_data_store = self.main_window.analysis_data_store
-
         self.right_panel = RightPanelResults(name_analysis = "Análisis Ejemplo 1", 
-                                        diagram_path = "./assets/diagram2.png",
+                                        result_dir = self.layers_path,
                                         main_window = self.main_window)
+        
+        
+        self.mosaic_view.viewer.layer_selected.connect(lambda key: self.on_change_layer(key))
         
         self.right_panel.setMaximumWidth(350)
 
@@ -1275,29 +2191,15 @@ class MapTreeScreen(QWidget):
         inner_layout.addWidget(self.right_panel, stretch=1)
         outer_layout.addWidget(inner_widget)   
 
-    def update_mosaic(self, current_layer):
-        if current_layer == "rgb":
-            mosaic_path = f"{self.layers_path[current_layer]}/tiles"
-            self.mosaic_view.update_layers(mosaic_path, None)
-        elif current_layer == "ndvi":
-            mosaic_path = f"{self.layers_path[current_layer]}/tiles"
-            self.mosaic_view.update_layers(mosaic_path, None)
-        elif current_layer == "map_deficiencies":
-            mosaic_path = f'{self.layers_path["rgb"]}/tiles'
-            deficientes_mask = f'{self.layers_path["map_deficiencies"]}/tiles'
-            self.mosaic_view.update_layers(mosaic_path, None)
+    def on_change_layer(self, layer):
+        if layer == "avg_ndvi" or layer == "ndvi":
+            self.right_panel.change_leyend(1)
         else:
-            mosaic_path = f"{self.layers_path[current_layer]}/tiles"
-            self.mosaic_view.update_layers(mosaic_path, None)
-
+            self.right_panel.change_leyend(0)
 
     def update_mosaic_view(self, layers_path):
         self.mosaic_view.update_layers_map(layers_path)
 
-    def set_layers(self, mosaic, layers):
-        self.layers_path = layers
-        self.update_mosaic(self.current_layer)
-    
     def load_layers_map(self, layers_path):
         self.layers_path = layers_path
         self.update_mosaic_view(self.layers_path)

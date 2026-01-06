@@ -4,7 +4,6 @@ import cv2
 import matplotlib.pyplot as plt
 import os
 from PIL import Image
-from tqdm import tqdm
 from pyproj import Proj, transform, CRS
 from pyproj import Transformer
 from scipy.spatial.transform import Rotation
@@ -14,13 +13,14 @@ from tqdm import tqdm
 from osgeo import gdal, osr
 from scipy.sparse import coo_matrix
 import numpy as np
-from tqdm import tqdm
 from scipy.sparse.linalg import lsqr
 from datetime import datetime
 import pandas as pd
 import json
 import copy
 import random
+
+from core.deficiency_classifier import NitrogenDefClassifer
 
 class FusionMethod(Enum):
     SIMPLE_AVERAGE = 1
@@ -165,8 +165,14 @@ def img_signal(I, bits, black, gain, exp_us):
 
 def compute_reflectance(Icorr, meta):
     cam = img_signal(Icorr, meta["bits"], meta["black"], meta["gain"], meta["exp_us"])   # Eq. 9
+    #print(f"Meta values: pCam={meta['pCam']}, irradiance={meta['irradiance']}, gain={meta['gain']}, exp_us={meta['exp_us']}")
     # reflectance_X = (X_camera * pCam_X) / (Irradiance_X)
-    ref = (cam * meta["pCam"]) / max(meta["irradiance"], 1e-12)
+    irradiance = meta["irradiance"]
+    ref = (cam * meta["pCam"]) / max(irradiance, 1e-12)
+
+    #cam = img_signal(Icorr, meta["bits"], meta["black"], meta["gain"], meta["exp_us"])   # Eq. 9
+    # reflectance_X = (X_camera * pCam_X) / (Irradiance_X)
+    #ref = (cam * meta["pCam"]) / max(meta["irradiance"], 1e-12)
     return ref
 
 def modern_ldp_ndvi_colormap(ndvi):
@@ -1534,6 +1540,129 @@ def apply_unique_detecs(images_metadata, unique_detects_trees):
 
     return images_metadata
 
+
+def create_map_trees_ids(mosaic_path = None, mosaic_image = None, base_dir = None):
+    if mosaic_image is not None:
+        mosaic_base = mosaic_image
+    elif mosaic_path is not None:
+        mosaic_base = cv2.imread(mosaic_path)
+
+    path_trees_results = f"{base_dir}/mosaic/trees/trees_results.json"
+
+    trees_results = []
+    
+    print("mosaic_base:", mosaic_base.shape)
+    with open(path_trees_results, 'r') as f:
+        trees_results = json.load(f)
+
+    # Definimos colores en BGR
+    try:
+        num_canales = mosaic_base.shape[2]
+    except IndexError:
+        num_canales = 1 # Imagen en escala de grises
+
+    if num_canales == 4:
+        print("Imagen BGRA detectada. Usando colores con canal Alpha.")
+        # [Azul, Verde, Rojo, Alpha] -> Alpha 255 es opaco
+        COLOR_ROJO = (0, 0, 255, 255)
+        COLOR_BLANCO = (255, 255, 255, 255)
+    else:
+        print("Imagen BGR estándar detectada.")
+        COLOR_ROJO = (0, 0, 255)
+        COLOR_BLANCO = (255, 255, 255)
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale_font = 2
+    thickness_font = 2
+    alpha_overlay = 0.5
+
+    COLOR_SALUDABLE = np.array([0, 255, 50], dtype=np.uint8)
+    COLOR_DEFICIENCIA = np.array([0, 247, 191],  dtype=np.uint8)
+
+    for r in trees_results:
+        xmin, y_min, x_max, y_max = r['bbox']
+        x_c = (xmin + x_max) // 2
+        y_c = (y_min + y_max) // 2
+        coord_center = (x_c, y_c)
+        tree_id = r["id"]
+        
+        
+        print("r['mask_path']:", r['mask_path'])
+        mask = cv2.imread(r['mask_path'],cv2.IMREAD_GRAYSCALE)
+        
+        if mask is None:
+            print("Mascara No encontrada")
+            continue
+        
+        print("mask.shape", mask.shape)
+        # 1. Asegurar que la máscara sea 2D
+        if len(mask.shape) == 3:
+            mask = mask.squeeze()
+        print("mask.shape")
+        h, w = mask.shape
+        y_max = y_min + h
+        x_max = xmin + w
+
+        roi = mosaic_base[y_min:y_max, xmin:x_max]
+        pixeles_base = roi[mask > 0, :3]
+        color_mask = COLOR_DEFICIENCIA if r['class'].upper() == "DEFICIENCIA" else COLOR_SALUDABLE
+        overlay_pixels = (pixeles_base * (1 - alpha_overlay)) + (color_mask * alpha_overlay)
+        
+        print("overlay_pixels:",  overlay_pixels.shape)
+        roi[mask > 0, :3] = overlay_pixels.astype(np.uint8)
+
+        #
+        #overlay = 
+        texto = str(tree_id)
+        
+        (ancho_text, alto_text), linea_base = cv2.getTextSize(texto, font, scale_font, thickness_font)
+
+        # Calculamos la posición de la esquina inferior izquierda del texto para que quede centrado
+        x_text = coord_center[0] - (ancho_text // 2)
+        y_text = coord_center[1] + (alto_text // 2)
+        posicion_text = (x_text, y_text)
+        
+
+        cv2.circle(
+            mosaic_base,
+            coord_center,
+            15,
+            COLOR_ROJO,
+            thickness=-1
+        )
+
+        # Dibujamos el texto
+        cv2.putText(
+            mosaic_base,
+            texto,
+            posicion_text,
+            font,
+            scale_font,
+            COLOR_BLANCO,
+            thickness_font,
+            lineType=cv2.LINE_AA # LINE_AA hace que los bordes del texto se vean suaves
+        )
+
+    path_map_trees = f"{base_dir}/mosaic/rgb/map_trees_ids.png"
+
+    print("path_map_trees:", path_map_trees)
+    mask_region = np.any(mosaic_base != 0, axis=2)
+    # Coordenadas donde hay datos
+    ys, xs = np.where(mask_region == 1)
+
+    if len(xs) == 0:
+        print("No hay ningún píxel válido en la imagen.")
+    else:
+        x_min, x_max = xs.min(), xs.max()
+        y_min, y_max = ys.min(), ys.max()
+
+    mosaic_base = mosaic_base[y_min: y_max + 1, x_min: x_max + 1, :]
+    cv2.imwrite(path_map_trees, mosaic_base)
+
+    path_card_map = f"{base_dir}/mosaic/rgb/card_map.png"
+    cv2.imwrite(path_card_map, mosaic_base[:,:,:3])
+    return path_map_trees
+
 class ImageSticher():
     def __init__(self, images_data, on_progress_change = None, on_cancel = None, result_dir = "./"):
         self.images_data = images_data
@@ -2208,12 +2337,12 @@ class ImageSticher():
 
         print("Save Averege")
         im_average = self.averge_images(images_warped) #np.mean(images_warped, axis=0).astype(np.uint8)
-        os.makedirs(f"./analisis/prueba-biochumbi-150-oct-test/mosaic/rgb", exist_ok=True)
-        cv2.imwrite(f"./analisis/prueba-biochumbi-150-oct-test/mosaic/rgb/averge_path_img_{batch_id}.png",im_average)
+        os.makedirs(f"{self.result_dir}/mosaic/rgb", exist_ok=True)
+        cv2.imwrite(f"{self.result_dir}/mosaic/rgb/averge_path_img_{batch_id}.png",im_average)
 
         mosaic, bleanding_masks, bboxes_val_regions, corners = self.seam_bleanding_process(images_warped, valid_region_masks, dom_size)
         
-        cv2.imwrite(f"./analisis/prueba-biochumbi-150-oct-test/mosaic/rgb/blending/bleanding_patch_img_{batch_id}.png", mosaic)
+        cv2.imwrite(f"{self.result_dir}/mosaic/rgb/blending/bleanding_patch_img_{batch_id}.png", mosaic)
 
         return mosaic, bleanding_masks, bboxes_val_regions, corners
 
@@ -2362,7 +2491,7 @@ class ImageSticher():
         if len(images_warped) > 1:
             #im_average = np.mean(images_warped, axis=0).astype(np.uint8)
             im_average = self.averge_images(images_warped)
-            cv2.imwrite(f"./analisis/prueba-biochumbi-150-oct-test/mosaic/rgb/averge_path_img_second_level.png",im_average)
+            cv2.imwrite(f"{self.result_dir}/mosaic/rgb/averge_path_img_second_level.png",im_average)
             final_mosaic, bleanding_masks, bboxes_val_regions, corners = self.seam_bleanding_process(images_warped, valid_region_masks_warped, dom_size)
 
             ## Bleanding Ndvi images
@@ -2578,10 +2707,16 @@ class ImageSticher():
             cv2.drawContours(mask, [contour_translated], -1, 255, -1)
             cv2.imwrite(mask_path, mask)
 
+        
+        unique_trees_info = [dict(img_path = r['img_path'], corner = r['corner'], mask_cropped_path = r['mask_cropped_path']) for r in unique_trees_results]
+        
+        with open(f"{dir_base}/results/unique_trees_detections/unique_detections.json", 'w') as f:
+            json.dump(unique_trees_info, f, indent=2)
+
         return unique_trees_results
 
     def apply_diagnosis_process(self, trees_detections, all_images_metadada_dict):
-        clases = ["saludable", "deficiencia"]
+        clases = ["saludable","deficiencia"]
         # calculate_average_ndvi(self, corner, tree_mask, img_path, all_files_metadata)
         magic_function = lambda mask, corner, img_path: (random.choices([0, 1], weights=[0.7, 0.3])[0], self.calculate_average_ndvi(corner, mask, img_path, all_images_metadada_dict))
         trees_diagnosis_results = copy.deepcopy(trees_detections)
@@ -2600,11 +2735,23 @@ class ImageSticher():
                 mask = mask.squeeze()
 
             corner = detection_result["corner"]
-            class_id, avg_ndvi = magic_function(mask, corner, img_path)
-            class_name = clases[class_id]
+            #class_id, avg_ndvi = magic_function(mask, corner, img_path)
+
+            prediction, hypercube = NitrogenDefClassifer.build_cube_and_predict(
+                rgb_path=img_path,
+                mask_tree= mask,
+                corner = corner,
+                all_metadata_images=all_images_metadada_dict
+            )
+            print("prediction:", prediction)
+            print("hypercube:", hypercube.shape)
+            ndvi = hypercube[4,:,:]
+            
+            avg_ndvi = ndvi[ndvi > 0.5].mean()
+            class_name = clases[prediction]
 
             trees_diagnosis_results[i]["diagnosis_class"] = class_name
-            trees_diagnosis_results[i]["avg_ndvi"] = avg_ndvi
+            trees_diagnosis_results[i]["avg_ndvi"] = float(avg_ndvi)
         
         return trees_diagnosis_results
 
@@ -2683,23 +2830,28 @@ class ImageSticher():
 
                 contours_new, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-                # 3. Elegir el contorno más grande por área
-                contours_new = max(contours_new, key=cv2.contourArea)
+                if contours_new and len(contours_new) > 0:
+                    # 3. Elegir el contorno más grande por área
+                    contours_new = max(contours_new, key=cv2.contourArea)
 
-                mask_tree_cropped = np.zeros(mask_tree_cropped.shape, dtype=np.uint8)
-                cv2.drawContours(mask_tree_cropped, [contours_new], -1, 255, -1)
+                    
+                    mask_tree_cropped = np.zeros(mask_tree_cropped.shape, dtype=np.uint8)
+                    cv2.drawContours(mask_tree_cropped, [contours_new], -1, 255, -1)
 
-                print("mask_tree_cropped.max()", mask_tree_cropped.max())
-                print("mask_tree_cropped,type:", mask_tree_cropped.dtype)
-                # plt.imshow(mask_tree_cropped)
-                # plt.title(f"mask_tree_cropped Tree - im - {i} ")
-                # plt.show()
-                
-                x_min, y_min = corner
-                h, w = mask_tree_cropped.shape
-                x_max, y_max = x_min + w, y_min + h
-                
-                tree_bbox = [int(x_min), int(y_min), int(x_max), int(y_max)]
+                    print("mask_tree_cropped.max()", mask_tree_cropped.max())
+                    print("mask_tree_cropped,type:", mask_tree_cropped.dtype)
+                    # plt.imshow(mask_tree_cropped)
+                    # plt.title(f"mask_tree_cropped Tree - im - {i} ")
+                    # plt.show()
+                    
+                    x_min, y_min = corner
+                    h, w = mask_tree_cropped.shape
+                    x_max, y_max = x_min + w, y_min + h
+                    
+                    tree_bbox = [int(x_min), int(y_min), int(x_max), int(y_max)]
+                else:
+                    print("contours_new:", contours_new)
+                    continue
             else:
                 poly_dom = seg_pts_to_dom([poly], H_abs_global[im_idx])[0]
                 x_min, y_min, x_max, y_max = bbox(poly_dom)
@@ -2730,8 +2882,11 @@ class ImageSticher():
             
             #np.save(f"{dir_trees}/tree_{x_min}_{y_min}.npy", contour_translated)
            
-           
-            path_mask = f"{dir_trees}/tree_{corner[0]}_{corner[1]}.png"
+            x_min_f = corner[0]
+            y_min_f = corner[1]
+
+            path_mask = f"{dir_trees}/tree_{x_min_f}_{y_min_f}.png"
+            print("mosaic trees path_mask:", path_mask)
             cv2.imwrite(path_mask, mask_tree_cropped)
 
             diagnosis_class = detection_result["diagnosis_class"]
@@ -2739,7 +2894,7 @@ class ImageSticher():
             trees_results.append({
                 "id": i,
                 "bbox": tree_bbox,
-                "mask_path": f"{dir_trees}/tree_{corner[0]}_{corner[1]}.png",
+                "mask_path": path_mask,
                 "seg_path": f"{dir_trees}/tree_{x_min}_{y_min}.npy",
                 "class": diagnosis_class,
                 "avg_ndvi": avg_ndvi
@@ -2854,18 +3009,17 @@ class ImageSticher():
             json.dump(final_trees_results, fp, indent=4) 
         
 
-
-
     def run(self, 
             name_file = None, 
             prefix_name = None,
             detector_keypoints = "SIFT",
             type_align_matrix = "affine"):
+        
         self.is_running = True
         
         metadata_rgb_images = [img_m for img_m in self.images_data if "_D.JPG" in img_m['relative_path']]
         
-        metadata_rgb_images = metadata_rgb_images[:90]
+        metadata_rgb_images = metadata_rgb_images
 
         all_images_metadada_dict = {img_m['name']:img_m for img_m in self.images_data}
 
@@ -2918,9 +3072,9 @@ class ImageSticher():
 
         adj_graph = build_adjacency_graph_from_edges(n_images, edges)
 
-        mst = prim_mst_2(n_images, adj_graph)
+        mst = prim_mst(n_images, adj_graph)
         # 6) Inicialización H absolute vía propagación en MST
-        H_abs = initialize_homographies2(n_images, mst)
+        H_abs = initialize_homographies(n_images, mst)
         if not self.check_continue_procress():
             return
         self.progress_update(40)
@@ -2960,7 +3114,7 @@ class ImageSticher():
         print("--------------Guardar Mosaic RGB-----------------")
         print("--------------Dividiendo en tiles-----------------")
         os.makedirs(f"{self.result_dir}/mosaic/rgb", exist_ok=True)
-        mosaic_path = f"{self.result_dir}/mosaic/rgb/{name_file}"
+        mosaic_path = f"{self.result_dir}/mosaic/rgb/mosaic_{name_file}"
         self.save_as_geotiff(
                 final_mosaic, 
                 mosaic_path, 
@@ -2981,7 +3135,7 @@ class ImageSticher():
         print("--------------Dividiendo en tiles-----------------")
 
         os.makedirs(f"{self.result_dir}/mosaic/ndvi", exist_ok=True)
-        ndvi_path = f"{self.result_dir}/mosaic/ndvi/{name_file}"
+        ndvi_path = f"{self.result_dir}/mosaic/ndvi/ndvi_{name_file}"
 
         self.save_as_geotiff(
                 cv2.cvtColor(final_ndvi, cv2.COLOR_BGR2RGB), 
@@ -3010,6 +3164,9 @@ class ImageSticher():
 
         unique_trees_results = self.save_unique_detections(unique_detects_trees, metadata_rgb_images, self.result_dir)
         print("--------------Procesando Diagnostico por imagenes-----------------")
+        
+        #NitrogenDefClassifer.configure("./best_resnet18_6ch.pth")
+        
         trees_diagnosis_results = self.apply_diagnosis_process(unique_trees_results, all_images_metadada_dict)
         print("--------------Guardando Arboles en Mosaico-----------------")
         self.save_trees_masks_mosaic(H_abs_global, 
@@ -3018,6 +3175,66 @@ class ImageSticher():
                                      first_level_bleanding_masks, first_level_bboxes_val_regions, first_level_corners,
                                      (height_px, width_px),
                                      self.result_dir)
+        
+
+
+        # Crear una máscara: True donde algún canal NO es cero
+        mask_region = np.any(final_mosaic != 0, axis=2)
+
+        # Crear canal alfa: 255 donde hay imagen, 0 donde está vacío
+        alpha = (mask_region.astype(np.uint8) * 255)
+
+        # Convertir a BGRA
+        mosaic_image = cv2.cvtColor(final_mosaic, cv2.COLOR_BGR2BGRA)
+
+        # Reemplazar canal alfa
+        mosaic_image[:, :, 3] = alpha
+
+        path_map_trees = create_map_trees_ids(mosaic_image = mosaic_image, base_dir = self.result_dir)
+
+        num_images = len(metadata_rgb_images)
+        alts = [im_data['relative_altitude'] for im_data in metadata_rgb_images]
+        avg_alt = sum(alts) / num_images
+        print("avg_alt:", avg_alt)
+
+        metadata_multispec_images = [img_m for img_m in self.images_data if "_D.JPG" not in img_m['relative_path']]
+        
+        multispec_gsd = [im_data['gsd_horizontal'] * 100 for im_data in metadata_multispec_images]
+        avg_gsd_multispec = sum(multispec_gsd) / len(multispec_gsd)
+
+        rgb_gsd = [im_data['gsd_horizontal'] * 100 for im_data in metadata_rgb_images]
+        avg_gsd_rgb = sum(rgb_gsd) / num_images
+        
+        
+        count_pixles = np.sum(np.any(final_mosaic > 0, axis=-1))
+        area_mosaic = (count_pixles * dom_resolution) / 1000000
+        
+        fecha_formateada = ""
+        if len(self.images_data) > 0:
+            exif_str = self.images_data[0]['datetime_original']
+            dt = datetime.strptime(exif_str, "%Y:%m:%d %H:%M:%S")
+
+            # Formatear al formato deseado
+            fecha_formateada = dt.strftime("%d/%m/%Y")
+
+        path_card_map = f"{self.result_dir}/mosaic/rgb/card_map.png"
+
+        processing_sumary = dict(
+            mosaic_rgb = mosaic_path,
+            mosaic_ndvi = ndvi_path,
+            trees_count = len(unique_detects_trees),
+            total_images = len(all_images_metadada_dict),
+            avg_alt = avg_alt,
+            avg_gsd_rgb = avg_gsd_rgb,
+            avg_gsd_multispec = avg_gsd_multispec,
+            area_mosaic = area_mosaic,
+            map_trees = path_map_trees,
+            card_map = path_card_map,
+            adquisition_date = fecha_formateada
+        )
+
+        with open(f"{self.result_dir}/processing_sumary.json", "w") as f:
+            json.dump(processing_sumary, f, indent =2)
         
         
         # if not self.check_continue_procress():

@@ -1,65 +1,39 @@
-import sys
-import folium
-from PySide6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget
-from PySide6.QtWebEngineWidgets import QWebEngineView
-import os
-from dotenv import load_dotenv
+import matplotlib.pyplot as plt
 
-import json
+# Nombres de categorías
+labels = [
+    "SALUDABLE",
+    "DEFICIENCIA"
+    #"DEFICIENCIA NITROGENO",
+    #"DEFICIENCIA ZINC",
+    #"DEFICIENCIA MAGNESIO",
+    #"DEF. NITROGENO Y ZINC",
+    #"DEF. NITROGENO Y MAGNESIO",
+    #"DEF. ZINC Y MAGNESIO",
+    #"DEF. NITROGENO ZINC Y MAGNESIO"
+]
 
-load_dotenv()
+# Valores simulados (suma debe ser 100)
+sizes = [85, 15]
+#, 6, 6, 8, 10, 8, 5]
 
-MAPBOX_TOKEN = os.getenv("MAPBOX_TOKEN")
+# Colores aproximados de la leyenda en la imagen
+colors = [
+    "#00FF00",  # SALUDABLE - verde fosforescente
+    "#CCFF00",  # NITROGENO - verde limón
+   # "#FF9900",  # ZINC - naranja
+   # "#FFD700",  # MAGNESIO - amarillo dorado
+   # "#CC6600",  # NITROGENO Y ZINC - marrón claro
+   # "#FFCC00",  # NITROGENO Y MAGNESIO - amarillo fuerte
+   # "#FF6600",  # ZINC Y MAGNESIO - naranja fuerte
+   # "#CC5500"   # NITROGENO ZINC Y MAGNESIO - marrón oscuro
+]
 
-class MapWindow(QMainWindow):
-    def __init__(self):
-        super().__init__()
-
-        # Crear el layout principal
-        layout = QVBoxLayout()
-
-        # Crear el mapa con Folium
-        self.m = folium.Map(location=[0, 0], zoom_start=2)
-
-        # Usar Mapbox como capa base (necesitas tu access_token)
-        mapbox_token = "tu_mapbox_access_token"
-        folium.TileLayer(
-            tiles=f"https://api.mapbox.com/styles/v1/mapbox/satellite-v9/tiles/{{z}}/{{x}}/{{y}}?access_token={MAPBOX_TOKEN}",
-            attr="Mapbox",
-            name="Mapbox",
-            overlay=False
-        ).add_to(self.m)
-
-        # Ruta al archivo GeoTIFF
-        geo_tiff_path = "imagen_georreferenciada.tif"
-
-        # Agregar el GeoTIFF como capa
-        folium.raster_layers.ImageOverlay(
-            image=geo_tiff_path,
-            bounds=[[10, 10], [-10, -10]],  # Define las coordenadas que cubre la imagen
-            opacity=0.7
-        ).add_to(self.m)
-
-        # Guardar el mapa en un archivo HTML
-        map_html = "mapa_con_geotiff_mapbox.html"
-        self.m.save(map_html)
-
-        # Agregar un visor web para mostrar el mapa
-        self.web_view = QWebEngineView()
-        self.web_view.setUrl(f"file://{map_html}")
-
-        # Añadir la vista web al layout
-        layout.addWidget(self.web_view)
-
-        # Configurar la ventana principal
-        main_widget = QWidget()
-        main_widget.setLayout(layout)
-        self.setCentralWidget(main_widget)
-        self.setWindowTitle("Mapbox con GeoTIFF")
-        self.setGeometry(100, 100, 800, 600)
-
-# Ejecutar la aplicación
-app = QApplication(sys.argv)
-window = MapWindow()
-window.show()
-sys.exit(app.exec())
+# Crear gráficoplt.figure(figsize=(8, 8), dpi=150)  # sube el dpi (150 o 200)
+plt.figure(figsize=(8, 8), dpi=200)
+plt.pie(sizes, labels=labels, colors=colors, autopct='%1.1f%%', startangle=140, textprops={'fontsize': 10})
+plt.axis('equal')  # Circulo perfecto
+plt.tight_layout()
+# Guardar con fondo gris también
+plt.savefig("diagrama_pastel_deficiencias_completo_fondo_gris.png", facecolor='lightgray', transparent=True)
+plt.show()

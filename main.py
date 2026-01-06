@@ -5,11 +5,16 @@ from PySide6.QtCore import Qt, QSize, Signal, QRectF, QMutex, Signal, Slot, Qt, 
 import os
 from dotenv import load_dotenv
 import sys
-from views.dialog_new_analysis import AnalysisData
+from core.utils import resource_path
+from views.dialog_new_analysis import AnalysisData, NewAnalysisDialog
 from views.home import Home
 from views.map_captures import MapCaptures
 from views.map_mosaic import MapTreeScreen
-load_dotenv()
+import multiprocessing 
+from datetime import datetime
+import json
+
+load_dotenv(resource_path('.env'))
 
 class NavItem(QWidget):
     def __init__(self, icon_path, text):
@@ -71,13 +76,13 @@ class MainContent(QWidget):
 
         self.navbar.addItem(item1)
         item1.setSizeHint(QSize(100, 100))
-        self.navbar.setItemWidget(item1, NavItem("./assets/home.svg", "Inicio"))
+        self.navbar.setItemWidget(item1, NavItem(resource_path(os.path.join("assets", "home.svg")), "Inicio"))
         self.navbar.addItem(item2)
         item2.setSizeHint(QSize(100, 100))
-        self.navbar.setItemWidget(item2, NavItem("./assets/map.svg", "Mapa Capturas"))
+        self.navbar.setItemWidget(item2, NavItem(resource_path(os.path.join("assets", "map.svg")), "Mapa Capturas"))
         self.navbar.addItem(item3)
         item3.setSizeHint(QSize(100, 100))
-        self.navbar.setItemWidget(item3, NavItem("./assets/map-marker.svg", "Mapa Arboles"))
+        self.navbar.setItemWidget(item3, NavItem(resource_path(os.path.join("assets", "map-marker.svg")), "Mapa Arboles"))
         self.navbar.setFixedWidth(105)
         self.navbar.currentRowChanged.connect(self.switch_page)
 
@@ -152,6 +157,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("AgroHass")
+        ruta_icono = resource_path(os.path.join("assets", "icon_software.ico"))
+        self.setWindowIcon(QIcon(ruta_icono))
         #self.setGeometry(100,100,800,600)
         self.resize(1300, 720)
         #self.setGeometry(100, 100, 800, 600)
@@ -160,12 +167,82 @@ class MainWindow(QMainWindow):
         main_widget.setStyleSheet("background-color: white;")  # fondo blanco
         main_layout = QHBoxLayout(main_widget)  # Asignamos el layout al widget
         main_layout.setContentsMargins(0,0,0,0)
-        main_content = MainContent()  # Asegúrate de que MainContent sea un QWidget
-        main_layout.addWidget(main_content)
+        self.main_content = MainContent()  # Asegúrate de que MainContent sea un QWidget
+        main_layout.addWidget(self.main_content)
         
         self.setCentralWidget(main_widget)  # Usar setCentralWidget en lugar de setLayout
         # Crear la barra de menú    
-       
+    
+    def open_new_analysis_dialog(self):
+        dialog = NewAnalysisDialog(self)
+        
+        def handle_finished_configure():
+            self.main_content.update_analysis_data(dialog.new_analysis_data_store)
+            base_dir = dialog.new_analysis_data_store.base_dir
+            images_data = dialog.new_analysis_data_store.images_data
+            name = dialog.new_analysis_data_store.name
+            
+            project_info = {
+                    "name": name,
+                    "creation_date": datetime.now().isoformat(),
+                    "num_images": len(images_data),
+                    "base_dir": base_dir
+                }
+            
+            config = {
+                    "project_info": project_info,
+                    "image_metatada": images_data
+                }
+
+            self.main_content.page_home.save_configure_analysis(base_dir, config)
+
+            self.main_content.page_home.appdata_manager.add_new_project(project_info)
+        
+        dialog.image_data_screen.finished_configure.connect(handle_finished_configure)
+
+        dialog.exec()
+
+    def load_analysis(self, path_dir):
+        with open(f"{path_dir}/config.json", "r") as f:
+            config = json.load(f)
+        
+        project_info = config['project_info']
+        print("project_info:", project_info)
+        
+        images_data = config['image_metatada']
+        print("Cargando datos.....")
+        images_data = {i: images_data[str(i)] for i in range(len(images_data))}
+        
+
+        analysis_data = AnalysisData(base_dir = project_info['base_dir'], name = project_info['name'], images_data=images_data)
+        print("Actualizando Vistas.....")
+        
+        self.main_content.update_analysis_data(analysis_data)
+
+        result_dir = self.main_content.analysis_data_store.base_dir
+
+        print("Cargando result_dir:", result_dir)
+
+        mosaic_path = f"{result_dir}/mosaic/rgb/tiles"
+        
+        if os.path.exists(mosaic_path):
+            self.main_content.page_map_trees.layers_ready.emit(result_dir)
+            self.main_content.switch_page(2, True)
+        else:
+            self.main_content.switch_page(1, True)
+
+    def open_analysis(self):
+        path_dir = QFileDialog.getExistingDirectory(
+            self,
+            "Seleciona Carpeta de Analisis Anterior",
+            "",
+        )
+
+        if path_dir:
+            print("Ruta de analisis:", path_dir)
+            self.load_analysis(path_dir)
+
+
     def create_menu_bar(self):
         # Obtener o crear la barra de menú
         menu_bar = self.menuBar()
@@ -185,7 +262,9 @@ class MainWindow(QMainWindow):
         
         # Acciones del menú Archivo
         new_action = file_menu.addAction("Nuevo")
+        new_action.triggered.connect(self.open_new_analysis_dialog)
         open_action = file_menu.addAction("Abrir...")
+        open_action.triggered.connect(self.open_analysis)
         file_menu.addSeparator()  # Línea separadora
         exit_action = file_menu.addAction("Salir")
         
@@ -203,6 +282,8 @@ class MainWindow(QMainWindow):
         pass
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
+    
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()

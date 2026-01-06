@@ -13,6 +13,7 @@ import gc
 import numpy as np
 from core.inference import TreeDetectorYolo
 from core.processing import generate_mosaic, ImageSticher
+from core.utils import resource_path
 
 
 MAPBOX_TOKEN = os.getenv("MAPBOX_TOKEN")
@@ -176,13 +177,13 @@ class MemoryAwareYOLOModel:
 
 class ImageProcessor(QObject):
     progress_updated = Signal(int)  # progress, message, current, total
+    progrees_status = Signal(str)
     finished = Signal()
     cancelled = Signal()
 
-    def __init__(self, image_data, result_storage, result_dir = "./", name_analysis = None):
+    def __init__(self, image_data, result_dir = "./", name_analysis = None):
         super().__init__()
         self.image_data = image_data
-        self.result_storage = result_storage
         self.is_running = True
         self.batch_size = 2
         self.result_dir = result_dir
@@ -194,6 +195,10 @@ class ImageProcessor(QObject):
         total = len(metadata_rgb_files)
         detector = TreeDetectorYolo.get_instance()
         all_predictions = []
+        processed = 0
+        
+        self.progrees_status.emit("Dectando Arboles...")
+
         for img_id, img_data in enumerate(metadata_rgb_files):
                 if not self.is_running:
                     self.cancelled.emit()
@@ -216,7 +221,8 @@ class ImageProcessor(QObject):
 
     def process(self):
         try:
-            
+            self.progrees_status.emit("Inciando Procesamiento...")
+
             all_images_data_metadata = list(self.image_data.values())
             print("Numero de Imagenes Orignales:", len(all_images_data_metadata))
             # Filtramos que no son perpendiculares
@@ -228,7 +234,7 @@ class ImageProcessor(QObject):
             
             print("Numero de Imagenes RGB:", len(metadata_rgb_files))
             
-            self.trees_detection_process(self, metadata_rgb_files)
+            self.trees_detection_process(metadata_rgb_files)
             
             for row in metadata_rgb_files:
                 row["detections_path"] = f"{self.result_dir}/results/detections/{row['name'][:-4]}_DETECTIONS.json"
@@ -240,9 +246,12 @@ class ImageProcessor(QObject):
                          on_cancel = lambda: self.cancelled.emit(),
                          result_dir = self.result_dir)
             
+            self.progrees_status.emit("Generando Mosiaco...")
+
             self.images_sticher.run(prefix_name = self.name_analysis)
 
             if self.is_running:
+                self.progrees_status.emit("Procesamiento Terminado")
                 self.finished.emit()
 
         except Exception as e:
@@ -377,9 +386,9 @@ class MapCaptures(QWidget):
         processing_label = QLabel("Procesamiento")
         processing_label.setStyleSheet("font-size: 18px; font-weight: bold;")
         processing_info_layout.addWidget(processing_label)
-        status_procesing = QLabel("Estado del procesameinto de imagenes")
-        status_procesing.setStyleSheet("font-size: 14px; padding-top: 5px; padding-bottom: 5px; color: #5F5F60;")
-        processing_info_layout.addWidget(status_procesing)
+        self.status_procesing = QLabel("Estado del procesameinto de imagenes")
+        self.status_procesing.setStyleSheet("font-size: 14px; padding-top: 5px; padding-bottom: 5px; color: #5F5F60;")
+        processing_info_layout.addWidget(self.status_procesing)
 
         self.progress_bar = RoundedProgressBar()
         self.progress_bar.setStyleSheet("""
@@ -403,7 +412,7 @@ class MapCaptures(QWidget):
         self.progress_bar.setTextVisible(False)
 
         self.start_button = QPushButton("  Iniciar Procesamiento")
-        self.start_button.setIcon(QIcon("./assets/play.svg"))
+        self.start_button.setIcon(QIcon(resource_path(os.path.join("assets", "play.svg"))))
         self.start_button.setIconSize(QSize(14, 14))
         self.start_button.setStyleSheet("""
             QPushButton {
@@ -540,7 +549,7 @@ class MapCaptures(QWidget):
     def show_cancel(self):
         self.start_button.clicked.disconnect()
         self.start_button.setText("  Cancelar Procesamiento")
-        self.start_button.setIcon(QIcon("./assets/cancel.svg"))
+        self.start_button.setIcon(QIcon(resource_path(os.path.join("assets", "cancel.svg"))))
         self.start_button.setStyleSheet("""
             QPushButton {
                 background-color: #E53935;
@@ -583,7 +592,7 @@ class MapCaptures(QWidget):
         """Vuelve a poner el botón en su estado inicial."""
         self.start_button.clicked.disconnect()
         self.start_button.setText("  Iniciar Procesamiento")
-        self.start_button.setIcon(QIcon("./assets/play.svg"))
+        self.start_button.setIcon(QIcon(resource_path(os.path.join("assets", "play.svg"))))
         self.start_button.setStyleSheet("""
             QPushButton {
                 background-color: #07C553;
@@ -688,7 +697,7 @@ class MapCaptures(QWidget):
     def setup_variables(self):
         self.processor_thread = None
         self.processor = None
-        self.result_storage = ResultStorage(output_dir="segmentacion_results")
+        #self.result_storage = ResultStorage(output_dir="segmentacion_results")
         self.image_data = {}
 
     def setup_processing_thread(self):
@@ -699,12 +708,12 @@ class MapCaptures(QWidget):
         print()
         self.processor = ImageProcessor(
             self.images_data, 
-            self.result_storage, 
             result_dir,
             name_analysis = name)
         self.processor.moveToThread(self.processor_thread)
 
         self.processor_thread.started.connect(self.processor.process)
+        self.processor.progrees_status.connect(self.update_status_process)
         self.processor.progress_updated.connect(self.update_progrees_bar)
         self.processor.cancelled.connect(self.proccessing_cancelled)
         self.processor.finished.connect(self.processing_finished)
@@ -714,7 +723,9 @@ class MapCaptures(QWidget):
         self.processor_thread.finished.connect(self.processor_thread.deleteLater)
 
         self.processor_thread.start()
-
+    @Slot(str)
+    def update_status_process(self, status):
+        self.status_procesing.setText(status)
     @Slot(int)
     def update_progrees_bar(self, progress):
         print("update process bar slot:", progress)
@@ -723,24 +734,12 @@ class MapCaptures(QWidget):
 
     @Slot()
     def processing_finished(self):
-        self.result_storage.save_remaining()
         self.cleanup_processing()
         
         result_dir = self.main_window.analysis_data_store.base_dir
         
-        #mosaic_path = f"{result_dir}/mosaic/tiles_mosaic"
-        #trees_seg = f"{result_dir}/mosaic/tiles_mask_trees"
 
-        mosaic_path = f"{result_dir}/mosaic/tiles_mosaic"
-        
-        layers_path = dict(
-            rgb = f"{result_dir}/mosaic/rgb",
-            ndvi = f"{result_dir}/mosaic/ndvi",
-            map_deficiencies = f"{result_dir}/mosaic/map_deficiencies"
-        )
-
-
-        self.main_window.page_map_trees.layers_ready.emit(mosaic_path, layers_path)
+        self.main_window.page_map_trees.layers_ready.emit(result_dir)
         
         self.main_window.switch_page(2, True)
         self.restaurar_boton()
