@@ -2776,8 +2776,9 @@ class ImageSticher():
             print("prediction:", prediction)
             print("hypercube:", hypercube.shape)
             ndvi = hypercube[4,:,:]
-            
             avg_ndvi = ndvi[ndvi > 0.5].mean()
+            mcari_avg = hypercube[-1,:,:][ndvi > 0.5].mean()
+            
             class_name = clases[prediction]
 
             trees_diagnosis_results[i]["diagnosis_class"] = class_name

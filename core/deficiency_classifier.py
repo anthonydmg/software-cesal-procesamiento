@@ -293,12 +293,15 @@ class NitrogenDefClassifer:
         gndvi = (nir_ref - green_ref) / (nir_ref + green_ref + eps)
         ndre  = (nir_ref - redge_ref) / (nir_ref + redge_ref + eps)
         ccci  = (ndvi - gndvi) / (ndvi + gndvi + eps)
+        
 
         sr = nir_ref / (red_ref + eps)
         msr = (sr - 1.0) / (np.sqrt(sr) + 1.0 + eps)
 
         L = 0.5
         savi = ((1 + L) * (nir_ref - red_ref)) / (nir_ref + red_ref + L + eps)
+
+        mcari = ((redge_ref - red_ref) - 0.2 * (red_ref - green_ref)) * (redge_ref / (red_ref + eps))
 
         rgb = cv2.imread(rgb_path, cv2.IMREAD_UNCHANGED)
         h_out, w_out =  rgb.shape[:2]
@@ -310,7 +313,7 @@ class NitrogenDefClassifer:
         
         #H_dewarp, h_out, w_out = ndvi_to_drgb(rgb_path, red_path)
         print("ndvi mean", ndvi.mean())
-        indices = [ndvi, gndvi, ndre, ccci, savi]
+        indices = [ndvi, gndvi, ndre, ccci, savi,mcari] 
         aligned_idx = []
 
         for idx in indices:
@@ -333,7 +336,7 @@ class NitrogenDefClassifer:
             axis=0
         ).astype(np.float32)
 
-        prediction = cls.predict(hypercube)
+        prediction = cls.predict(hypercube[:-1,:,:])
 
         return prediction, hypercube
         
