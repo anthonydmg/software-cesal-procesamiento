@@ -74,8 +74,38 @@ def apply_hmatrix(I, H, out_shape=None):
     return cv2.warpPerspective(I, H, out_shape, flags=cv2.INTER_LINEAR)
 
 
-def img_signal(I, bits, black, gain, exp_us):
+def img_signal(I, bits, black, gain, exp_raw):
     # Normalize raw to [0,1], subtract normalized black, divide by gain * (exp/1e6)
+    exp_us = None
+    if exp_raw is None:
+        exp_us = 1000.0  # fallback: 1000 us
+    else:
+        # Si es una fracción "1/1250"
+        if isinstance(exp_raw, str) and "/" in exp_raw:
+            try:
+                a, b = exp_raw.split("/")
+                seconds = float(a) / float(b)
+                exp_us = seconds * 1e6
+            except Exception:
+                try:
+                    exp_us = float(exp_raw) * 1e6
+                except Exception:
+                    exp_us = 1000.0
+        else:
+            # numérico o string que representa float
+            try:
+                val = float(exp_raw)
+                # heurística: si val < 10 it's almost certainly seconds (e.g. 0.0008),
+                # if val > 1000 probably already in microseconds, so leave
+                if val < 10.0:
+                    # treat as seconds -> convert to microseconds
+                    exp_us = val * 1e6
+                else:
+                    # treat as microseconds already
+                    exp_us = val
+            except Exception:
+                exp_us = 1000.0
+
     denom = float(2**bits)
     I_norm = I.astype(np.float64) / denom
     black_norm = float(black) / denom
@@ -195,24 +225,27 @@ class NitrogenDefClassifer:
         arr = cube.transpose(1,2,0)
 
         predictions = []
+        tiles = []
         # If your data is small, consider reducing num_tiles
         for _ in range(num_tiles):
             h, w, _ = arr.shape
             if h <= tile_size or w <= tile_size:
                 top = 0
                 left = 0
-                tile = arr[top:top+tile_size, left:left+tile_size, :]
             else:
                 top = random.randint(0, h - tile_size)
                 left = random.randint(0, w - tile_size)
-                tile = arr[top:top+tile_size, left:left+tile_size, :]
 
-            tile_t = torch.from_numpy(tile).permute(2,0,1).float().unsqueeze(0).to(cls._device)
-            out = model(tile_t)
-            pred = torch.argmax(out, dim=1).item()
-            predictions.append(pred)
-        
-        final = max(set(predictions), key=predictions.count)
+            tile = arr[top:top+tile_size, left:left+tile_size, :]
+            tiles.append(tile)
+        batch = np.stack(tiles, axis=0)
+        batch_t = torch.from_numpy(batch).permute(2,0,1).float().unsqueeze(0).to(cls._device)
+
+        with torch.no_grad():
+            out = model(batch_t)
+            preds = torch.argmax(out, dim=1).cpu().numpy()
+
+        final = np.bincount(preds).argmax()
         return final
 
     @classmethod

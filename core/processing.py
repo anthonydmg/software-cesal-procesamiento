@@ -154,8 +154,38 @@ def per_band_pipeline(path, metadata):
     I3 = apply_hmatrix(I2, H_cal, out_shape=(I2.shape[1], I2.shape[0]))
     return I3, metadata
 
-def img_signal(I, bits, black, gain, exp_us):
+def img_signal(I, bits, black, gain, exp_raw):
     # Normalize raw to [0,1], subtract normalized black, divide by gain * (exp/1e6)
+    exp_us = None
+    if exp_raw is None:
+        exp_us = 1000.0  # fallback: 1000 us
+    else:
+        # Si es una fracción "1/1250"
+        if isinstance(exp_raw, str) and "/" in exp_raw:
+            try:
+                a, b = exp_raw.split("/")
+                seconds = float(a) / float(b)
+                exp_us = seconds * 1e6
+            except Exception:
+                try:
+                    exp_us = float(exp_raw) * 1e6
+                except Exception:
+                    exp_us = 1000.0
+        else:
+            # numérico o string que representa float
+            try:
+                val = float(exp_raw)
+                # heurística: si val < 10 it's almost certainly seconds (e.g. 0.0008),
+                # if val > 1000 probably already in microseconds, so leave
+                if val < 10.0:
+                    # treat as seconds -> convert to microseconds
+                    exp_us = val * 1e6
+                else:
+                    # treat as microseconds already
+                    exp_us = val
+            except Exception:
+                exp_us = 1000.0
+
     denom = float(2**bits)
     I_norm = I.astype(np.float64) / denom
     black_norm = float(black) / denom
@@ -2718,7 +2748,7 @@ class ImageSticher():
     def apply_diagnosis_process(self, trees_detections, all_images_metadada_dict):
         clases = ["saludable","deficiencia"]
         # calculate_average_ndvi(self, corner, tree_mask, img_path, all_files_metadata)
-        magic_function = lambda mask, corner, img_path: (random.choices([0, 1], weights=[0.7, 0.3])[0], self.calculate_average_ndvi(corner, mask, img_path, all_images_metadada_dict))
+        # magic_function = lambda mask, corner, img_path: (random.choices([0, 1], weights=[0.7, 0.3])[0], self.calculate_average_ndvi(corner, mask, img_path, all_images_metadada_dict))
         trees_diagnosis_results = copy.deepcopy(trees_detections)
         
         for i in range(len(trees_detections)):
