@@ -2776,13 +2776,16 @@ class ImageSticher():
             print("prediction:", prediction)
             print("hypercube:", hypercube.shape)
             ndvi = hypercube[4,:,:]
-            avg_ndvi = ndvi[ndvi > 0.5].mean()
-            mcari_avg = hypercube[-1,:,:][ndvi > 0.5].mean()
-            
+            avg_ndvi = ndvi[ndvi >= 0.3].mean()
+            mcari_avg = hypercube[-1,:,:][ndvi >= 0.3].mean()
+
+            print("avg_ndvi:", avg_ndvi)
+            print("mcari_avg:", mcari_avg)
             class_name = clases[prediction]
 
             trees_diagnosis_results[i]["diagnosis_class"] = class_name
             trees_diagnosis_results[i]["avg_ndvi"] = float(avg_ndvi)
+            trees_diagnosis_results[i]["mcari_avg"] = float(mcari_avg)
         
         return trees_diagnosis_results
 
@@ -2922,13 +2925,16 @@ class ImageSticher():
 
             diagnosis_class = detection_result["diagnosis_class"]
             avg_ndvi = detection_result["avg_ndvi"]
+            mcari_avg = detection_result["mcari_avg"]
+            
             trees_results.append({
                 "id": i,
                 "bbox": tree_bbox,
                 "mask_path": path_mask,
                 "seg_path": f"{dir_trees}/tree_{x_min}_{y_min}.npy",
                 "class": diagnosis_class,
-                "avg_ndvi": avg_ndvi
+                "avg_ndvi": avg_ndvi,
+                "mcari_avg" : mcari_avg
             })
 
         ## Ordenar y creaar ids
@@ -2944,6 +2950,7 @@ class ImageSticher():
         trees_results_temp = copy.deepcopy(sorted_trees_resultas)
         current_tree_x = first_tree["bbox"][0]
         i = 2
+        
         while len(trees_results_temp) > 0:
             sorted_trees_results_temp = sorted(trees_results_temp, key = lambda x: abs(x["bbox"][0] - current_tree_x) + 2* x["bbox"][1])
             next_tree = sorted_trees_results_temp.pop(0)
@@ -2957,7 +2964,8 @@ class ImageSticher():
         ## guardar info
 
         with open(f"{dir_base}/mosaic/trees/trees_results.json", "w") as fp:
-            json.dump(final_trees_results, fp, indent=4) 
+            json.dump(final_trees_results, fp, indent=4)
+
 
     def save_unique_trees_masks(self, H_abs_global, unique_detects_trees, dir_base):
         
@@ -3208,6 +3216,37 @@ class ImageSticher():
                                      self.result_dir)
         
 
+        # NDVI mean distribution
+        
+        healthy_count_ndvi = 0
+        warning_count_ndvi = 0
+        possible_problem_count_ndvi = 0
+        critical_problem_count_ndvi = 0
+
+        for tree_result in trees_diagnosis_results:
+            if tree_result["avg_ndvi"] > 0.70:
+                healthy_count_ndvi += 1
+            elif tree_result["avg_ndvi"] > 0.55:
+                warning_count_ndvi += 1
+            elif tree_result["avg_ndvi"] > 0.40:
+                possible_problem_count_ndvi += 1
+            else:
+                critical_problem_count_ndvi += 1
+
+
+        # MACARI mean distribution
+        
+        healthy_count_mcari = 0
+        warning_count_mcari = 0
+        critical_problem_count_mcari = 0
+
+        for tree_result in trees_diagnosis_results:
+            if tree_result["mcari_avg"] > 0.1:
+                healthy_count_mcari += 1
+            elif tree_result["mcari_avg"] > 0.07:
+                warning_count_mcari += 1
+            else:
+                critical_problem_count_mcari += 1
 
         # Crear una máscara: True donde algún canal NO es cero
         mask_region = np.any(final_mosaic != 0, axis=2)
@@ -3261,7 +3300,14 @@ class ImageSticher():
             area_mosaic = area_mosaic,
             map_trees = path_map_trees,
             card_map = path_card_map,
-            adquisition_date = fecha_formateada
+            adquisition_date = fecha_formateada,
+            healthy_count_ndvi = healthy_count_ndvi,
+            warning_count_ndvi = warning_count_ndvi,
+            possible_problem_count_ndvi = possible_problem_count_ndvi,
+            critical_problem_count_ndvi = critical_problem_count_ndvi,
+            healthy_count_mcari = healthy_count_mcari,
+            warning_count_mcari = warning_count_mcari,
+            critical_problem_count_mcari = critical_problem_count_mcari
         )
 
         with open(f"{self.result_dir}/processing_sumary.json", "w") as f:

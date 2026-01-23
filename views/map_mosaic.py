@@ -2,7 +2,7 @@ from PySide6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QGroupBox,
                                QLabel, QGraphicsScene, QGraphicsView, QGraphicsPixmapItem, 
                                QToolButton, QFrame, QPushButton, QFileDialog, QRadioButton, 
                                QToolTip, QDialog, QMessageBox, QSpacerItem, QSizePolicy,
-                               QLineEdit, QComboBox, QButtonGroup, QTextEdit, QCheckBox, QStackedWidget
+                               QLineEdit, QComboBox, QButtonGroup, QTextEdit, QCheckBox, QStackedWidget, QGridLayout
                                )
 from PySide6.QtGui import QLinearGradient, QPalette, QColor, QPainter, QPixmap, QImage, QIcon
 from PySide6.QtGui import QFont, QPen, QBrush
@@ -22,7 +22,7 @@ import cv2
 import copy
 from core.report_generator import crear_reporte, EXAMPLE_DATOS_ARBOLES, EXAMPLE_MAP_IMAGE, EXAMPLE_COMENTARIOS
 import sys, time, tempfile, os, shutil, json
-
+from PySide6.QtWidgets import QGraphicsDropShadowEffect
 from core.utils import resource_path
 
 class ColorTreeState:
@@ -32,8 +32,8 @@ class ColorTreeState:
             "color_rgb": (0, 255, 50)
         },
         "DEFICIENCIA": {
-            "color_hex": "#BFF700",
-            "color_rgb": (191, 247, 0)
+            "color_hex": "#F97316",
+            "color_rgb": (249, 115, 22)
         }
     }
 
@@ -48,50 +48,72 @@ class ColorNdvi:
     @staticmethod
     def get_color(ndvi_value):
         # Define segments (low, high, color_low(RGB), color_high(RGB))
-
+        color_red         = np.array([200, 20, 0], dtype=np.float32)
         color_dark_orange = np.array([220, 100, 0], dtype=np.float32)
         color_soft_orange = np.array([220, 170, 0], dtype=np.float32) # Intermedio
-        color_yellow      = np.array([220, 240, 0], dtype=np.float32)
+        color_yellow      = np.array([220, 200, 0], dtype=np.float32)
         color_lime        = np.array([120, 200, 0], dtype=np.float32) # Intermedio hacia verde
         color_green       = np.array([20, 80, 0], dtype=np.float32)
 
+
+        # color_red         = np.array([200, 0, 0], dtype=np.float32)
+        # color_dark_orange = np.array([220, 100, 0], dtype=np.float32)
+        # color_yellow      = np.array([220, 200, 0], dtype=np.float32)
+        # color_green       = np.array([20, 120, 0], dtype=np.float32)
+
+        # color_scale = [
+        #     # 🔴 Condición crítica (0.00 - 0.40): rojo → naranja oscuro
+        #     (0.00, 0.40, color_red, color_dark_orange),
+
+        #     # 🟠 Posible problema (0.40 - 0.55): naranja oscuro → amarillo
+        #     (0.40, 0.55, color_dark_orange, color_yellow),
+
+        #     # 🟡 Precaución (0.55 - 0.70): amarillo → verde claro
+        #     (0.55, 0.70, color_yellow, np.array([140, 200, 0], dtype=np.float32)),
+
+        #     # 🟢 Saludable (0.70 - 1.00): verde claro → verde fuerte
+        #     (0.70, 1.00, np.array([140, 200, 0], dtype=np.float32), color_green),
+        # ]
+        
         color_scale = [
-            (-1.0, -0.6, np.array([0, 0, 0], dtype=np.float32),   np.array([0, 0, 251], dtype=np.float32)),   # black -> blue
-            (-0.6, 0.0, np.array([0, 0, 251], dtype=np.float32), np.array([220, 0, 251], dtype=np.float32)), # blue -> purple
-            (0.0, 0.5, np.array([220, 0, 251], dtype=np.float32), np.array([220, 0, 120], dtype=np.float32)), # purple -> pink
-            (0.5, 0.6, np.array([220, 0, 120], dtype=np.float32),  np.array([220, 100, 0], dtype=np.float32)), # pink -> dark orange
+            #(-1.0, -0.6, np.array([0, 0, 0], dtype=np.float32),   np.array([0, 0, 251], dtype=np.float32)),   # black -> blue
+            #(-0.6, 0.0, np.array([0, 0, 251], dtype=np.float32), np.array([220, 0, 251], dtype=np.float32)), # blue -> purple
+            #(0.0, 0.5, np.array([220, 0, 251], dtype=np.float32), np.array([220, 0, 120], dtype=np.float32)), # purple -> pink
+            #(0.5, 0.40, np.array([220, 0, 120], dtype=np.float32),  np.array([220, 100, 0], dtype=np.float32)), # pink -> dark orange
             # --- RANGO 0.6 a 0.9 (Dividido en dos partes) ---
             # De 0.80 a 0.85: Naranja oscuro a Naranja suave
-            (0.60, 0.70, color_dark_orange, color_soft_orange),
+            (0.0, 0.40, color_red, color_dark_orange),
+            # De 0.80 a 0.85: Naranja oscuro a Naranja suave
+            (0.40, 0.55, color_dark_orange, color_soft_orange),
             
             # De 0.85 a 0.90: Naranja suave a Amarillo
-            (0.70, 0.80, color_soft_orange, color_yellow),
+            (0.55, 0.70, color_soft_orange, color_yellow),
 
             # --- RANGO 0.9 a 1.0 (Dividido en dos partes) ---
             # De 0.90 a 0.95: Amarillo a Verde Lima (hace que el 0.92 se vea muy distinto al 0.98)
-            (0.80, 0.85, color_yellow, color_lime),
+            (0.70, 0.75 , color_yellow, color_lime),
             
             # De 0.95 a 1.00: Verde Lima a Verde Oscuro
-            (0.85, 1.00, color_lime, color_green),
+            (0.75, 1.00, color_lime, color_green),
         ]
 
-        segments = [
-            (-1.0, -0.6, np.array([0, 0, 0], dtype=np.float32),   np.array([0, 0, 251], dtype=np.float32)),   # black -> blue
-            (-0.6, 0.0, np.array([0, 0, 251], dtype=np.float32), np.array([220, 0, 251], dtype=np.float32)), # blue -> purple
-            (0.0, 0.5, np.array([220, 0, 251], dtype=np.float32), np.array([220, 0, 120], dtype=np.float32)), # purple -> pink
-            (0.5, 0.8, np.array([220, 0, 120], dtype=np.float32),  np.array([220, 100, 0], dtype=np.float32)),  # pink -> dark orange
-            (0.80, 0.85, color_dark_orange, color_soft_orange),
+        # segments = [
+        #     (-1.0, -0.6, np.array([0, 0, 0], dtype=np.float32),   np.array([0, 0, 251], dtype=np.float32)),   # black -> blue
+        #     (-0.6, 0.0, np.array([0, 0, 251], dtype=np.float32), np.array([220, 0, 251], dtype=np.float32)), # blue -> purple
+        #     (0.0, 0.5, np.array([220, 0, 251], dtype=np.float32), np.array([220, 0, 120], dtype=np.float32)), # purple -> pink
+        #     (0.5, 0.8, np.array([220, 0, 120], dtype=np.float32),  np.array([220, 100, 0], dtype=np.float32)),  # pink -> dark orange
+        #     (0.80, 0.85, color_dark_orange, color_soft_orange),
             
-            # De 0.85 a 0.90: Naranja suave a Amarillo
-            (0.85, 0.90, color_soft_orange, color_yellow),
+        #     # De 0.85 a 0.90: Naranja suave a Amarillo
+        #     (0.85, 0.90, color_soft_orange, color_yellow),
 
-            # --- RANGO 0.9 a 1.0 (Dividido en dos partes) ---
-            # De 0.90 a 0.95: Amarillo a Verde Lima (hace que el 0.92 se vea muy distinto al 0.98)
-            (0.90, 0.95, color_yellow, color_lime),
+        #     # --- RANGO 0.9 a 1.0 (Dividido en dos partes) ---
+        #     # De 0.90 a 0.95: Amarillo a Verde Lima (hace que el 0.92 se vea muy distinto al 0.98)
+        #     (0.90, 0.95, color_yellow, color_lime),
             
-            # De 0.95 a 1.00: Verde Lima a Verde Oscuro
-            (0.95, 1.00, color_lime, color_green),
-        ]
+        #     # De 0.95 a 1.00: Verde Lima a Verde Oscuro
+        #     (0.95, 1.00, color_lime, color_green),
+        # ]
 
         # Assign for each segment
         for low, high, c_low, c_high in color_scale:
@@ -103,6 +125,35 @@ class ColorNdvi:
         return [0, 0, 0]
 
 
+
+class ColorMcari:
+
+    @staticmethod
+    def get_color(mcari_value):
+        # Define segments (low, high, color_low(RGB), color_high(RGB))
+        color_red         = np.array([200, 20, 0], dtype=np.float32)
+        color_dark_orange = np.array([220, 100, 0], dtype=np.float32)
+        color_soft_orange = np.array([220, 170, 0], dtype=np.float32) # Intermedio
+        color_yellow      = np.array([220, 200, 0], dtype=np.float32)
+        color_lime        = np.array([120, 200, 0], dtype=np.float32) # Intermedio hacia verde
+        color_green       = np.array([20, 80, 0], dtype=np.float32)
+
+        color_scale = [
+            # --- RANGO 0.0 a 1 (Dividido en  partes) ---
+            (0.0, 0.07, color_dark_orange, color_yellow),
+            (0.07, 0.085 , color_soft_orange, color_yellow),
+            (0.085, 0.10 , color_yellow, color_lime),
+            (0.10, 0.25, color_lime, color_green),
+        ]
+
+        for low, high, c_low, c_high in color_scale:
+            if ((mcari_value >= low) & (mcari_value < high)) or (high == 1.0 and mcari_value >=1.0):
+                t = (mcari_value - low) / (high - low)
+            # Interpolate per-channel
+                color = (c_low * (1.0 - t) + c_high * t).astype(np.uint8) 
+                return list(color)
+        return [0, 0, 0]
+    
 
 class LeyendaSaludWidget(QWidget):
     def __init__(self, parent=None):
@@ -323,7 +374,7 @@ class PdfGeneratorWorker(QThread):
             
             if sumary_processing:
                 if self.data['incl_area']:
-                    general_info.append(("Area Apox. Terreno:", f'{round(sumary_processing["area_mosaic"],2)} ha'))
+                    general_info.append(("Área Apox. Terreno:", f'{round(sumary_processing["area_mosaic"],2)} ha'))
 
                 if self.data["incl_fecha"]:
                     general_info.append(("Fecha de Adquisición:", sumary_processing["adquisition_date"]))
@@ -1146,7 +1197,7 @@ class GeoTIFFViewer(QWidget):
             }
         """)
 
-        self.layers_menu.setFixedSize(200, 120)
+        self.layers_menu.setFixedSize(340, 120)
         self.layers_menu.hide()  # Oculto por defecto
 
         layout_layers = QVBoxLayout(self.layers_menu)
@@ -1155,6 +1206,7 @@ class GeoTIFFViewer(QWidget):
         self.rb_mapa = QRadioButton("MAPA")
         self.rb_def = QRadioButton("MAPA DE DEFICIENCIAS")
         self.rb_ndvi_avg = QRadioButton("MAPA NDVI PROMEDIO")
+        self.rb_mcari_avg = QRadioButton("MAPA MCARI PROMEDIO (ASOCIADO DEF. ZINC)")
         #self.rb_ndvi.setStyleSheet("""
         #        QRadioButton {
         #            background-color: transparent;
@@ -1167,13 +1219,14 @@ class GeoTIFFViewer(QWidget):
         #layout_layers.addWidget(self.rb_ndvi)
         layout_layers.addWidget(self.rb_def)
         layout_layers.addWidget(self.rb_ndvi_avg)
-
+        layout_layers.addWidget(self.rb_mcari_avg)
 
         # Conectar cambios de radio
         #self.rb_ndvi.toggled.connect(lambda: self.show_mosaic_ndvi())
         self.rb_mapa.toggled.connect(lambda: self.show_mosaic_rgb())
         self.rb_def.toggled.connect(lambda: self.show_deficients_map())
         self.rb_ndvi_avg.toggled.connect(lambda: self.show_avg_ndvi_masks())
+        self.rb_mcari_avg.toggled.connect(lambda: self.show_mcari_avg_masks())
         # Iconos simples
         #self.zoom_in_btn.setText("+")
         #self.zoom_out_btn.setText("-")
@@ -1327,9 +1380,22 @@ class GeoTIFFViewer(QWidget):
             qimage_ndvi = self.mask_to_qimage(mask = mask, color_mask = color_ndvi)
 
             item_ndvi = QGraphicsPixmapItem(QPixmap.fromImage(qimage_ndvi))
+
+
             item_ndvi.setPos(x_pos, y_pos)
 
             trees_r['avg_ndvi_mask'] = item_ndvi
+
+
+            # Items de mascaras de mcari promedio
+            mcari_avg = trees_r["mcari_avg"]
+
+            color_mcari = ColorMcari.get_color(mcari_avg)
+            color_mcari = color_mcari + [200]
+            qimage_mcari = self.mask_to_qimage(mask = mask, color_mask = color_mcari)
+            item_mcari = QGraphicsPixmapItem(QPixmap.fromImage(qimage_mcari))
+            item_mcari.setPos(x_pos, y_pos)
+            trees_r['mcari_avg_mask'] = item_mcari
 
         return trees_results
 
@@ -1357,6 +1423,17 @@ class GeoTIFFViewer(QWidget):
         
         return masks_items
 
+
+    def load_trees_mcari_avg(self, trees_results, z_value = 1):
+        masks_items = []
+        
+        for trees_r in trees_results:
+            item_mcari = trees_r['mcari_avg_mask']
+            item_mcari.setZValue(z_value)
+            self.scene.addItem(item_mcari)
+            masks_items.append(item_mcari)
+        
+        return masks_items
 
     def geotiff_to_qimage(self, path):
         """Convierte GeoTIFF a QImage"""
@@ -1504,6 +1581,8 @@ class GeoTIFFViewer(QWidget):
             self.trees_mask_hover = trees_results
 
             self.avg_ndvi_masks_items = self.load_trees_ndvi_avg(trees_results, z_value = 4)
+
+            self.mcari_avg_masks_items = self.load_trees_mcari_avg(trees_results, z_value = 5)
         
     
     def contains_masks(self, pos_scene, mask_hover):
@@ -1562,6 +1641,7 @@ class GeoTIFFViewer(QWidget):
         # 6. Tooltip solo cuando cambia de máscara
         class_str = hovered_mask['class']
         avg_ndvi = round(hovered_mask["avg_ndvi"], 3)
+        mcari_avg = round(hovered_mask["mcari_avg"], 3)
         state = class_str.capitalize() if class_str.upper() == "SALUDABLE" else "Con " + class_str.capitalize()
 
         html = f"""
@@ -1578,7 +1658,8 @@ class GeoTIFFViewer(QWidget):
 
                 <div style="font-size:12px;">
                     <b>Estado:</b> {state}<br>
-                    <b>NDVI Promedio:</b> {avg_ndvi}
+                    <b>NDVI Promedio:</b> {avg_ndvi} <br>
+                    <b>MCARI Promedio:</b> {mcari_avg}
                 </div>
             </div>
         """
@@ -1608,6 +1689,9 @@ class GeoTIFFViewer(QWidget):
 
         for item in self.avg_ndvi_masks_items:
             item.setVisible(False)
+        
+        for item in self.mcari_avg_masks_items:
+            item.setVisible(False)
 
     def show_mosaic_ndvi(self):
         self.on_selected_layer("ndvi")
@@ -1621,6 +1705,9 @@ class GeoTIFFViewer(QWidget):
             item.setVisible(False)
         
         for item in self.avg_ndvi_masks_items:
+            item.setVisible(False)
+        
+        for item in self.mcari_avg_masks_items:
             item.setVisible(False)
     
 
@@ -1638,6 +1725,9 @@ class GeoTIFFViewer(QWidget):
         for item in self.avg_ndvi_masks_items:
             item.setVisible(False)
 
+        for item in self.mcari_avg_masks_items:
+            item.setVisible(False)
+
         #return super().show()
 
     def show_avg_ndvi_masks(self):
@@ -1652,6 +1742,27 @@ class GeoTIFFViewer(QWidget):
             item.setVisible(False)
 
         for item in self.avg_ndvi_masks_items:
+            item.setVisible(True)
+
+        for item in self.mcari_avg_masks_items:
+            item.setVisible(False)
+
+    
+    def show_mcari_avg_masks(self):
+        self.on_selected_layer("mcari_avg")
+        for item in self.rgb_items:
+            item.setVisible(True)
+        
+        for item in self.ndvi_items:
+            item.setVisible(False)
+        
+        for item in self.trees_masks_items:
+            item.setVisible(False)
+
+        for item in self.avg_ndvi_masks_items:
+            item.setVisible(False)
+
+        for item in self.mcari_avg_masks_items:
             item.setVisible(True)
 
 
@@ -1861,42 +1972,87 @@ class DiagramWidget(QWidget):
 
 
 class StatCard(QFrame):
-    def __init__(self, title: str, value: int, parent=None):
+    def __init__(self, title: str, value: int, area:int, parent=None):
         super().__init__(parent)
+        # Sombra suave alrededor de la tarjeta
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(10)          # Suavidad de la sombra
+        shadow.setXOffset(0)              # Desplazamiento horizontal
+        shadow.setYOffset(1)              # Desplazamiento vertical
+        shadow.setColor(QColor(0, 0, 0, 40))  # Negro con transparencia
 
+        self.setGraphicsEffect(shadow)
         # Configurar borde, fondo y esquinas redondeadas
         #self.setFrameShape(QFrame.StyledPanel)
         self.setObjectName("StatCardFrame")   # ← ID único
-
+        
         self.setStyleSheet("""
             #StatCardFrame {
                 background-color: #FFFFFF;
-                border: 2px solid #CCCCCC;
+                border: 2px solid #F4F5F7;
                 border-radius: 18px;
                 padding-top: 5px;
             }
         """)
 
-        # Título
+        # Num Arboles Layout
+        layout_count = QVBoxLayout()
+        ## Título
         lbl_title = QLabel(title)
         lbl_title.setAlignment(Qt.AlignCenter)
-        lbl_title.setFont(QFont("Segoe UI", 13))
+        lbl_title.setFont(QFont("Segoe UI", 11))
         lbl_title.setStyleSheet("color: #0A281A;")
 
-        # Valor
+        layout_count.addWidget(lbl_title)
+
+        ## Arboles
         self.lbl_value = QLabel(str(value))
         self.lbl_value.setAlignment(Qt.AlignCenter)
-        self.lbl_value.setFont(QFont("Segoe UI", 34, QFont.Bold))
+        self.lbl_value.setFont(QFont("Segoe UI", 24, QFont.Bold))
         self.lbl_value.setStyleSheet("color: #0A281A;")
 
+        layout_count.addWidget(self.lbl_value)
+
+        # Line verticarl
+
+        linea = QFrame()
+        linea.setFrameShape(QFrame.VLine)
+        linea.setFrameShadow(QFrame.Raised)
+        #linea.setStyleSheet("color: #d1d1d1;") # Color de la línea
+        linea.setFixedWidth(2)
+        linea.setStyleSheet("background-color: #F4F5F7; border-radius: 1px")
+
+
+        # Area Estimadas
+        layout_area = QVBoxLayout()
+        ## Título
+        lbl_title_area = QLabel("Área Estimada")
+        lbl_title_area.setAlignment(Qt.AlignCenter)
+        lbl_title_area.setFont(QFont("Segoe UI", 11))
+        lbl_title_area.setStyleSheet("color: #0A281A;")
+
+        layout_area.addWidget(lbl_title_area)
+        ## Area valor
+        self.val_area = QLabel(f'{area}<span style="font-size:14px; color:#D3D3D3;"> Ha</span>')
+        self.val_area.setFont(QFont("Segoe UI", 24, QFont.Bold))
+        self.val_area.setAlignment(Qt.AlignCenter)
+        layout_area.addWidget(self.val_area)
+        
         # Layout
-        layout = QVBoxLayout(self)
-        layout.addWidget(lbl_title)
-        layout.addWidget(self.lbl_value)
+        layout = QHBoxLayout(self)
+        
+        layout.addLayout(layout_count)
+        layout.addWidget(linea)
+        layout.addLayout(layout_area)
+
+        #layout.addWidget(self.lbl_value)
         layout.setContentsMargins(20, 15, 20, 15)
     
     def update_count(self, num_trees = 0):
         self.lbl_value.setText(str(num_trees))
+
+    def update_area(self, area = 0):
+        self.val_area.setText(f'{area}<span style="font-size:20px; color:#D3D3D3;"> Ha</span>')
         
 
 class DonutChartWidget(QWidget):
@@ -1950,7 +2106,7 @@ class DonutChartWidget(QWidget):
         p.drawPie(rect, start_angle, healthy_angle)
 
         # DEFICIENT (amarillo)
-        p.setBrush(QColor("#FFC000"))
+        p.setBrush(QColor("#F97316"))
         p.drawPie(rect, start_angle + healthy_angle, deficient_angle)
 
         # ========================
@@ -1983,21 +2139,21 @@ class DonutChartWidget(QWidget):
             )
         # TEXTOS IZQUIERDA (Healthy)
         left_x = cx #- radius * 0.10
-        top_left_y = cy - radius * 0.50
+        top_left_y = cy - radius * 0.10
 
         print("left_x:", left_x)
         print("top_left_y:", top_left_y)
-        draw_text(left_x, top_left_y, "Saludable", 0.03, True, QColor("#22A529"))
-        draw_text(left_x, top_left_y + radius * 0.15, f"{self.percentage_healthy}%", 0.04, True, QColor("black"))
-        draw_text(left_x, top_left_y + radius * 0.30, f"({self.healthy} Árboles)", 0.03, False, QColor("gray"))
+        draw_text(left_x, top_left_y + radius * 0.24, "Saludable", 0.05, True, QColor("#22A529"))
+        draw_text(left_x, top_left_y , f"{self.percentage_healthy}%", 0.09, True, QColor("black"))
+        #draw_text(left_x, top_left_y + radius * 0.30, f"({self.healthy} Árboles)", 0.03, False, QColor("gray"))
 
         # TEXTOS DERECHA (Deficient)
         right_x = cx #+ radius * 0.90
         top_right_y = cy + radius * 0.10
 
-        draw_text(right_x, top_right_y, "Con Deficiencia",  0.03, True, QColor("#FFC000"))
-        draw_text(right_x, top_right_y + radius * 0.15, f"{self.percentage_deficient}%", 0.04, True, QColor("black"))
-        draw_text(right_x, top_right_y + radius * 0.30, f"({self.deficient} Árboles)", 0.03  , False, QColor("gray"))
+        #draw_text(right_x, top_right_y, "Con Deficiencia",  0.03, True, QColor("#FFC000"))
+        #draw_text(right_x, top_right_y + radius * 0.15, f"{self.percentage_deficient}%", 0.04, True, QColor("black"))
+        #draw_text(right_x, top_right_y + radius * 0.30, f"({self.deficient} Árboles)", 0.03  , False, QColor("gray"))
 
     # =================================================
     #       ACTUALIZAR VALORES EXTERNAMENTE
@@ -2008,6 +2164,412 @@ class DonutChartWidget(QWidget):
         
         self.percentage_healthy = round(healthy * 100 / (healthy + deficient), 2) 
         self.percentage_deficient = round(deficient * 100 / (healthy + deficient),2) 
+        self.update()
+
+
+class StatCountWidget(QWidget):
+    def __init__(self, color, title, percentage, count, parent=None):
+        super().__init__(parent)
+        
+        # Layout principal vertical
+        layout = QVBoxLayout(self)
+        layout.setSpacing(2) # Espacio pequeño entre líneas
+        
+        # --- Fila superior (Punto de color + Título) ---
+        header_layout = QHBoxLayout()
+        header_layout.setSpacing(8)
+        
+        # El "punto" de color hecho con un QFrame
+        dot = QFrame()
+        dot.setFixedSize(12, 12)
+        dot.setStyleSheet(f"background-color: {color}; border-radius: 6px;")
+        
+        title_label = QLabel(title.upper())
+        title_label.setStyleSheet("color: #8E97A4; font-weight: bold; font-size: 11px;")
+        
+        header_layout.addWidget(dot)
+        header_layout.addWidget(title_label)
+        header_layout.addStretch() # Empuja todo a la izquierda
+        
+        # --- Fila media (Porcentaje) ---
+        self.percent_label = QLabel(percentage)
+        self.percent_label.setStyleSheet("color: #2D3748; font-size: 22px; font-weight: 800;")
+        
+        # --- Fila inferior (Subtexto de ejemplares) ---
+        self.count_label = QLabel(f"{count} Árboles")
+        self.count_label.setStyleSheet("color: #718096; font-size: 12px;")
+        
+        # Agregar todo al layout principal
+        layout.addLayout(header_layout)
+        layout.addWidget(self.percent_label)
+        layout.addWidget(self.count_label)
+    
+    def update_stat(self, count, percentage):
+        self.percent_label.setText(f"{percentage}%")
+        self.count_label.setText(f"{count} Árboles")
+        
+
+
+class StatsDeficiency(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Dashboard Stats")
+        self.setStyleSheet("background-color: white;") # Fondo blanco como en la imagen
+        
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(40) # Espacio entre los dos bloques
+
+        # Bloque Saludable (Verde)
+        self.saludable = StatCountWidget("#108548", "Saludable", "0.0%", 0)
+        
+        # Bloque Deficiencia (Amarillo/Naranja)
+        self.deficiencia = StatCountWidget("#F97316", "Deficiencia", "0.0%", 0)
+
+        main_layout.addWidget(self.saludable)
+        main_layout.addWidget(self.deficiencia)
+        main_layout.addStretch()
+    
+    def update_stats(self, num_healty, num_deficency):
+        percentage_healthy = round(num_healty * 100 / (num_healty + num_deficency), 2) 
+        percentage_deficient = round(num_deficency * 100 / (num_healty + num_deficency),2) 
+        
+        self.saludable.update_stat(num_healty, percentage_healthy)
+        self.deficiencia.update_stat(num_deficency, percentage_deficient)
+
+
+class CantanierStats(QFrame):
+    def __init__(self, parent = None):
+        super().__init__(parent)
+        self.setObjectName("CantanierStats")   # ← ID único
+        self.setStyleSheet("""
+            #CantanierStats {
+                background-color: #FFFFFF;
+                border: 2px solid #F4F5F7;
+                border-radius: 18px;
+                margin-top: 10px;
+                margin-bottom: 10px;
+            }
+        """)
+
+        title_graph = QLabel("DISTRIBUCIÓN DE DEFICIENCIAS DE NITRÓGENO")
+        title_graph.setWordWrap(True)
+        title_graph.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title_graph.setStyleSheet("""
+            QLabel {
+                color: #8E97A4;            /* Color gris azulado de la imagen */
+                font-size: 12px;           /* Tamaño de fuente pequeño */
+                font-weight: bold;         /* Negrita */
+                letter-spacing: 1.2px;     /* Espaciado entre letras clave para este estilo */
+                background-color: transparent;
+                padding-top: 15px;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(2) # Espacio pequeño entre líneas
+
+        self.diagram_widget = DonutChartWidget(healthy=10, deficient=10)
+        self.stats_defs = StatsDeficiency()
+        layout.addWidget(title_graph)
+        layout.addWidget(self.diagram_widget)
+        layout.addWidget(self.stats_defs, alignment= Qt.AlignCenter)
+
+        self.setLayout(layout)
+
+
+# --- Constantes de Color Leyenda NDVI---
+COLOR_GREEN = "#1b833d"    # Saludable
+COLOR_YELLOW = "#eab308"   # Precaución
+COLOR_ORANGE = "#f97316"   # Problema Probable
+COLOR_RED = "#dc2626"      # Problema Crítico
+COLOR_BG_CARD = "#eeeeee"  # Fondo de la tarjeta
+COLOR_TEXT_TITLE = "#495057"
+COLOR_TEXT_SUBTITLE = "#868e96"
+
+class LegendItemVI(QWidget):
+    def __init__(self, color, title, count, range_text, parent=None):
+        super().__init__(parent)
+        # Layout principal vertical para que el subtítulo quede debajo
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 10, 0, 10)
+        layout.setSpacing(2)
+
+        # --- Fila superior: [PUNTO] [TÍTULO] [CUENTA] ---
+        top_row_layout = QHBoxLayout()
+        top_row_layout.setSpacing(12) # Espacio entre el punto y el texto
+        top_row_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # 1. El punto de color
+        dot = QFrame()
+        dot.setFixedSize(10, 10)
+        dot.setStyleSheet(f"background-color: {color}; border-radius: 5px;")
+        
+        # 2. Título
+        title_label = QLabel(title)
+        title_font = QFont()
+        title_font.setBold(True)
+        title_font.setPointSize(10)
+        title_label.setFont(title_font)
+        title_label.setStyleSheet(f"color: {COLOR_TEXT_TITLE};")
+        
+        # 3. Cuenta (el número)
+        self.count_label = QLabel(str(count))
+        count_font = QFont()
+        count_font.setBold(True)
+        count_font.setPointSize(11)
+        self.count_label.setFont(count_font)
+        self. count_label.setStyleSheet(f"color: {color};")
+
+        # Añadimos todo a la fila superior con alineación centrada verticalmente
+        top_row_layout.addWidget(dot, alignment=Qt.AlignVCenter)
+        top_row_layout.addWidget(title_label, alignment=Qt.AlignVCenter)
+        top_row_layout.addWidget(self.count_label, alignment=Qt.AlignVCenter)
+        #top_row_layout.addStretch() 
+
+        # --- Fila inferior: Subtítulo (alineado con el inicio del texto del título) ---
+        # Usamos un margen izquierdo para que el subtítulo no quede debajo del punto
+        self.range_text = range_text
+        self.subtitle_label = QLabel(f"({self.range_text}): {count} árboles")
+        self.subtitle_label.setStyleSheet(f"""
+            color: {COLOR_TEXT_SUBTITLE}; 
+            font-size: 11px;
+            margin-left: 22px; 
+        """) # 22px = 10px (dot) + 12px (spacing) aprox.
+
+        layout.addLayout(top_row_layout)
+        layout.addWidget(self.subtitle_label, alignment=Qt.AlignTop)
+        layout.addStretch()
+    
+    def update_value_count(self, value):
+        count = str(value)
+        self.count_label.setText(count)
+        self.subtitle_label.setText(f"({self.range_text}): {count} árboles")
+        
+
+class NDVIScaleCard(QFrame):
+    """
+    El widget principal tipo tarjeta que contiene todo.
+    """
+    def __init__(self, num_health = 0, num_warning = 0, num_potential_issue = 0, num_critical_problem = 0, parent=None):
+        super().__init__(parent)
+        # Estilo principal de la tarjeta (fondo, bordes redondeados)
+        self.setStyleSheet(f"""
+            NDVIScaleCard {{
+                border-radius: 15px;
+                border: 1px solid #e9ecef;
+                margin-top: 10px;
+                margin-bottom: 10px;           
+            }}
+        """)
+        
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(30, 25, 30, 30)
+        main_layout.setSpacing(20)
+
+        # --- Título Principal ---
+        title_label = QLabel("ESCALA DE SALUD NDVI")
+        title_label.setWordWrap(True)
+        title_label.setAlignment(Qt.AlignCenter)
+        title_font = QFont()
+        title_font.setBold(True)
+        title_font.setPointSize(10)
+        title_font.setLetterSpacing(QFont.AbsoluteSpacing, 1.2) # Espaciado entre letras
+        title_label.setFont(title_font)
+        title_label.setStyleSheet(f"color: {COLOR_TEXT_TITLE};")
+        main_layout.addWidget(title_label)
+
+        # --- Contenido (Barra izquierda + Leyenda derecha) ---
+        content_layout = QHBoxLayout()
+        content_layout.setSpacing(25)
+
+        # 1. Sección Izquierda: Barra de Degradado y Etiquetas
+        scale_layout = QGridLayout()
+        scale_layout.setSpacing(0)
+        
+        # Etiquetas numéricas
+        labels_vals = ["1.0", "0.70", "0.55", "0.40", "0.0"]
+        for i, val in enumerate(labels_vals):
+            lbl = QLabel(val)
+            lbl.setStyleSheet(f"color: #adb5bd; font-weight: bold; font-size: 11px; margin-right: 8px;")
+            # Alinear verticalmente: el primero arriba, el último abajo, los del medio centrados
+            align = Qt.AlignVCenter
+            if i == 0: align = Qt.AlignTop
+            if i == len(labels_vals) -1: align = Qt.AlignBottom
+            
+            # Añadir a la columna 0
+            scale_layout.addWidget(lbl, i*2, 0, alignment=align)
+            # Truco: añadir espaciadores entre etiquetas para distribuir la altura
+            if i < len(labels_vals) - 1:
+                 scale_layout.addItem(QSpacerItem(1, 1, QSizePolicy.Minimum, QSizePolicy.Expanding), (i*2)+1, 0)
+
+
+        # La barra de color en sí (un QFrame delgado)
+        gradient_bar = QFrame()
+        gradient_bar.setFixedWidth(8)
+        # CSS crucial para el degradado vertical y bordes redondeados
+        gradient_bar.setStyleSheet(f"""
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop: 0 {COLOR_GREEN},
+                stop: 0.35 {COLOR_YELLOW},
+                stop: 0.65 {COLOR_ORANGE},
+                stop: 1.0 {COLOR_RED});
+            border-radius: 4px;
+        """)
+        # La barra ocupa la columna 1 y se expande verticalmente
+        scale_layout.addWidget(gradient_bar, 0, 1, 9, 1) # Ocupa 9 filas del grid
+
+        content_layout.addLayout(scale_layout)
+
+        # 2. Sección Derecha: Leyenda (Lista de items)
+        legend_layout = QVBoxLayout()
+        legend_layout.setSpacing(0)
+        legend_layout.setContentsMargins(0,0,0,0)
+
+        # Crear los items usando nuestra clase reutilizable
+        self.item1 = LegendItemVI(COLOR_GREEN, "SALUDABLE", num_health, "> 0.70")
+        self.item2 = LegendItemVI(COLOR_YELLOW, "PRECAUCIÓN", num_warning, "0.55 - 0.70")
+        self.item3 = LegendItemVI(COLOR_ORANGE, "POSIBLE PROBLEMA", num_potential_issue, "0.40 - 0.55")
+        self.item4 = LegendItemVI(COLOR_RED, "CONDICIÓN CRÍTICA", num_critical_problem, "< 0.40")
+        
+        legend_layout.addWidget(self.item1)
+        legend_layout.addWidget(self.item2)
+        legend_layout.addWidget(self.item3)
+        legend_layout.addWidget(self.item4)
+        # Empujar los items hacia arriba
+        #legend_layout.addStretch()
+
+        content_layout.addLayout(legend_layout)
+        
+        # Añadir el contenido al layout principal de la tarjeta
+        main_layout.addLayout(content_layout)
+    
+    def update_counts(self, num_health = 0, num_warning = 0, num_potential_issue = 0, num_critical_problem = 0):
+        self.item1.update_value_count(num_health)
+        self.item2.update_value_count(num_warning)
+        self.item3.update_value_count(num_potential_issue)
+        self.item4.update_value_count(num_critical_problem)
+
+        self.update()
+
+class MCARIScaleCard(QFrame):
+    """
+    El widget principal tipo tarjeta que contiene todo.
+    """
+    def __init__(self, num_health = 0, num_warning = 0, num_critical_problem = 0, parent=None):
+        super().__init__(parent)
+        # Estilo principal de la tarjeta (fondo, bordes redondeados)
+        self.setStyleSheet(f"""
+            MCARIScaleCard {{
+                border-radius: 15px;
+                border: 1px solid #e9ecef;
+                margin-top: 10px;
+                margin-bottom: 10px;           
+            }}
+        """)
+        
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(30, 25, 30, 30)
+        main_layout.setSpacing(20)
+
+        # --- Título Principal ---
+        title_label = QLabel("ESCALA DE SALUD MCARI (ASOCIADO A DEF. ZINC)")
+        title_label.setWordWrap(True)
+        title_label.setAlignment(Qt.AlignCenter)
+        title_font = QFont()
+        title_font.setBold(True)
+        title_font.setPointSize(10)
+        title_font.setLetterSpacing(QFont.AbsoluteSpacing, 1.2) # Espaciado entre letras
+        title_label.setFont(title_font)
+        title_label.setStyleSheet(f"color: {COLOR_TEXT_TITLE};")
+        main_layout.addWidget(title_label)
+
+        # --- Contenido (Barra izquierda + Leyenda derecha) ---
+        content_layout = QHBoxLayout()
+        content_layout.setSpacing(25)
+
+        # 1. Sección Izquierda: Barra de Degradado y Etiquetas
+        scale_layout = QGridLayout()
+        scale_layout.setSpacing(0)
+        
+        # Etiquetas numéricas
+        labels_vals = ["0.25", "0.1", "0.07", "0.0"]
+        for i, val in enumerate(labels_vals):
+            lbl = QLabel(val)
+            lbl.setStyleSheet(f"color: #adb5bd; font-weight: bold; font-size: 11px; margin-right: 8px;")
+            # Alinear verticalmente: el primero arriba, el último abajo, los del medio centrados
+            align = Qt.AlignVCenter
+            if i == 0: align = Qt.AlignTop
+            if i == len(labels_vals) -1: align = Qt.AlignBottom
+            
+            # Añadir a la columna 0
+            scale_layout.addWidget(lbl, i*2, 0, alignment=align)
+            # Truco: añadir espaciadores entre etiquetas para distribuir la altura
+            if i < len(labels_vals) - 1:
+                 scale_layout.addItem(QSpacerItem(1, 1, QSizePolicy.Minimum, QSizePolicy.Expanding), (i*2)+1, 0)
+
+
+
+        #         color_scale = [
+        #     # --- RANGO 0.0 a 1 (Dividido en  partes) ---
+        #     (0.0, 0.07, color_dark_orange, color_yellow),
+        #     (0.07, 0.085 , color_soft_orange, color_yellow),
+        #     (0.085, 0.10 , color_yellow, color_lime),
+        #     (0.10, 0.25, color_lime, color_green),
+        # ]
+
+
+        #      gradient_bar.setStyleSheet(f"""
+        #     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        #         stop: 0 {COLOR_GREEN},
+        #         stop: 0.35 {COLOR_YELLOW},
+        #         stop: 0.65 {COLOR_ORANGE},
+        #         stop: 1.0 {COLOR_RED});
+        #     border-radius: 4px;
+        # """)
+
+        # La barra de color en sí (un QFrame delgado)
+        gradient_bar = QFrame()
+        gradient_bar.setFixedWidth(8)
+        # CSS crucial para el degradado vertical y bordes redondeados
+        gradient_bar.setStyleSheet(f"""
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop: 0 {COLOR_GREEN},
+                stop: 0.60 {COLOR_YELLOW},
+                stop: 1.0 {COLOR_RED});
+            border-radius: 4px;
+        """)
+        # La barra ocupa la columna 1 y se expande verticalmente
+        scale_layout.addWidget(gradient_bar, 0, 1, 9, 1) # Ocupa 9 filas del grid
+
+        content_layout.addLayout(scale_layout)
+
+        # 2. Sección Derecha: Leyenda (Lista de items)
+        legend_layout = QVBoxLayout()
+        legend_layout.setSpacing(0)
+        legend_layout.setContentsMargins(0,0,0,0)
+
+        # Crear los items usando nuestra clase reutilizable
+        self.item1 = LegendItemVI(COLOR_GREEN, "SALUDABLE", num_health, "> 0.1")
+        self.item2 = LegendItemVI(COLOR_YELLOW, "PRECAUCIÓN", num_warning, "0.07 - 0.1")
+        self.item4 = LegendItemVI(COLOR_RED, "CONDICIÓN CRÍTICA", num_critical_problem, "< 0.07")
+        
+        legend_layout.addWidget(self.item1)
+        legend_layout.addWidget(self.item2)
+        legend_layout.addWidget(self.item4)
+        # Empujar los items hacia arriba
+        #legend_layout.addStretch()
+
+        content_layout.addLayout(legend_layout)
+        
+        # Añadir el contenido al layout principal de la tarjeta
+        main_layout.addLayout(content_layout)
+    
+    def update_counts(self, num_health = 0, num_warning = 0, num_critical_problem = 0):
+        self.item1.update_value_count(num_health)
+        self.item2.update_value_count(num_warning)
+        self.item4.update_value_count(num_critical_problem)
+
         self.update()
 
 class RightPanelResults(QWidget):
@@ -2029,22 +2591,43 @@ class RightPanelResults(QWidget):
         container_layout.addSpacing(15)
 
         ## Diagrama
-        self.count_trees_card = StatCard("Total de Arboles Detectados", 0)
+        self.count_trees_card = StatCard("Arboles Detectados", 0, 0)
+        title_graph = QLabel("DISTRIBUCIÓN DE DEFICIENCIAS DE NITRÓGENO")
+        title_graph.setStyleSheet("""
+            QLabel {
+                color: #8E97A4;            /* Color gris azulado de la imagen */
+                font-size: 12px;           /* Tamaño de fuente pequeño */
+                font-weight: bold;         /* Negrita */
+                letter-spacing: 1.2px;     /* Espaciado entre letras clave para este estilo */
+                background-color: transparent;
+                padding-top: 15px;
+            }
+        """)
         self.diagram_widget = DonutChartWidget(healthy=10, deficient=10) # 
+        self.stats_defs = StatsDeficiency()
         
         if result_dir:
             self.result_dir = result_dir
             self.update_view(self, result_dir)
         
         container_layout.addWidget(self.count_trees_card)
-        container_layout.addWidget(self.diagram_widget)
+        
+        self.container_stats = CantanierStats(self)
+        #container_layout.addWidget(self.container_stats)
+        #container_layout.addWidget(title_graph)
+        #container_layout.addWidget(self.diagram_widget)
+        #container_layout.addWidget(self.stats_defs, alignment= Qt.AlignCenter)
+        
         self.stack_leyends = QStackedWidget()
         self.legend_widget = LegendWidget() 
-        self.leyend_ndvi = LeyendaSaludWidget()
+        self.leyend_ndvi = NDVIScaleCard()
+        self.leyend_mcari = MCARIScaleCard()
 
         # 4Añadir tus widgets al Stack
-        self.stack_leyends.addWidget(self.legend_widget)  # Índice 0
+        self.stack_leyends.addWidget(self.container_stats)  # Índice 0
+        
         self.stack_leyends.addWidget(self.leyend_ndvi)     # Índice 1
+        self.stack_leyends.addWidget(self.leyend_mcari)
         self.stack_leyends.setCurrentIndex(0)
         
         container_layout.addWidget(self.stack_leyends)
@@ -2123,8 +2706,32 @@ class RightPanelResults(QWidget):
             def_trees = [ r for r in trees_result if r['class'] == "deficiencia"]
 
             self.count_trees_card.update_count(len(trees_result))
-            self.diagram_widget.update_values(healthy = len(sal_trees), deficient = len(def_trees))
+            self.container_stats.diagram_widget.update_values(healthy = len(sal_trees), deficient = len(def_trees))
+            self.container_stats.stats_defs.update_stats(len(sal_trees), len(def_trees))
 
+        process_summary_path = f"{result_dir}/processing_sumary.json"
+
+        if os.path.exists(process_summary_path):
+            with open(process_summary_path, "r") as f:
+                process_summary = json.load(f)
+
+                area = process_summary.get("area_mosaic", 0)
+
+                self.count_trees_card.update_area(round(area, 2))
+                
+                num_health = process_summary.get("healthy_count_ndvi", 0)
+                num_warning = process_summary.get("warning_count_ndvi", 0)
+                num_potential_issue = process_summary.get("possible_problem_count_ndvi", 0)
+                num_critical_problem = process_summary.get("critical_problem_count_ndvi", 0)
+                
+                self.leyend_ndvi.update_counts(num_health, num_warning, num_potential_issue, num_critical_problem)
+
+                healthy_count_mcari = process_summary.get("healthy_count_mcari", 0)
+                warning_count_mcari = process_summary.get("warning_count_mcari", 0)
+                critical_problem_count_mcari = process_summary.get("critical_problem_count_mcari", 0)
+
+                self.leyend_mcari.update_counts(num_health=healthy_count_mcari, num_warning=warning_count_mcari, num_critical_problem=critical_problem_count_mcari)
+    
     def update_title(self, title):
         self.name_analysis = title
         self.title_results.update_title(title)
@@ -2194,6 +2801,8 @@ class MapTreeScreen(QWidget):
     def on_change_layer(self, layer):
         if layer == "avg_ndvi" or layer == "ndvi":
             self.right_panel.change_leyend(1)
+        elif layer == "mcari_avg":
+            self.right_panel.change_leyend(2)
         else:
             self.right_panel.change_leyend(0)
 

@@ -600,16 +600,16 @@ class ImageDataTableScreen(QFrame):
     def go_back_to_image_selection(self):
         self.dialog_parent.go_back_to_image_selection()
     
-    def add_image_data(self):
-        image_data = [["Imagen1.jpg", "12.345", "-67.890", "139.5", "-90.0", "180.00" , "2025-01-28"],
-            ["Imagen2.tiff", "45.678", "-123.456", "2025-01-27",  "-90.0", "180.00" , "2025-01-28"],
-            ["Imagen3.jpg", "23.456", "-98.765", "2025-01-26",  "-90.0", "180.00" , "2025-01-28"]]
+    # def add_image_data(self):
+    #     image_data = [["Imagen1.jpg", "12.345", "-67.890", "139.5", "-90.0", "180.00" , "2025-01-28"],
+    #         ["Imagen2.tiff", "45.678", "-123.456", "2025-01-27",  "-90.0", "180.00" , "2025-01-28"],
+    #         ["Imagen3.jpg", "23.456", "-98.765", "2025-01-26",  "-90.0", "180.00" , "2025-01-28"]]
         
-        for data in image_data:
-            row_position = self.table.rowCount()
-            self.table.insertRow(row_position)
-            for column, value in enumerate(data):
-                self.table.setItem(row_position, column, QTableWidgetItem(value))
+    #     for data in image_data:
+    #         row_position = self.table.rowCount()
+    #         self.table.insertRow(row_position)
+    #         for column, value in enumerate(data):
+    #             self.table.setItem(row_position, column, QTableWidgetItem(value))
 
     def finish_configure(self):
         self.finished_configure.emit()

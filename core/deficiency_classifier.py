@@ -226,6 +226,7 @@ class NitrogenDefClassifer:
 
         predictions = []
         tiles = []
+        print("arr:", arr.shape)
         # If your data is small, consider reducing num_tiles
         for _ in range(num_tiles):
             h, w, _ = arr.shape
@@ -239,8 +240,10 @@ class NitrogenDefClassifer:
             tile = arr[top:top+tile_size, left:left+tile_size, :]
             tiles.append(tile)
         batch = np.stack(tiles, axis=0)
-        batch_t = torch.from_numpy(batch).permute(2,0,1).float().unsqueeze(0).to(cls._device)
+        print("batch:", batch.shape)
+        batch_t = torch.from_numpy(batch).permute(0,3,1,2).float().to(cls._device)
 
+        print("batch_t:", batch_t.shape)
         with torch.no_grad():
             out = model(batch_t)
             preds = torch.argmax(out, dim=1).cpu().numpy()
@@ -303,6 +306,10 @@ class NitrogenDefClassifer:
 
         mcari = ((redge_ref - red_ref) - 0.2 * (red_ref - green_ref)) * (redge_ref / (red_ref + eps))
 
+        print("mcari max:", mcari.max())
+        print("mcari min:", mcari.min())
+        print("mcari mean:", mcari.mean())
+        
         rgb = cv2.imread(rgb_path, cv2.IMREAD_UNCHANGED)
         h_out, w_out =  rgb.shape[:2]
         H_dewarp = red_file_metadata["H_dewarp"]
@@ -313,7 +320,7 @@ class NitrogenDefClassifer:
         
         #H_dewarp, h_out, w_out = ndvi_to_drgb(rgb_path, red_path)
         print("ndvi mean", ndvi.mean())
-        indices = [ndvi, gndvi, ndre, ccci, savi,mcari] 
+        indices = [ndvi, gndvi, ndre, ccci, savi, mcari] 
         aligned_idx = []
 
         for idx in indices:
@@ -336,6 +343,7 @@ class NitrogenDefClassifer:
             axis=0
         ).astype(np.float32)
 
+        print("hypercube:", hypercube.shape)
         prediction = cls.predict(hypercube[:-1,:,:])
 
         return prediction, hypercube

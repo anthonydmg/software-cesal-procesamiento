@@ -11,6 +11,91 @@ import os
 import shutil
 from datetime import datetime
 
+
+class TarjetaLogo(QLabel):
+    def __init__(self, ruta_imagen):
+        super().__init__()
+        # Estilo: Fondo blanco, borde suave y esquinas redondeadas
+        self.setStyleSheet("""
+            background-color: white;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 5px;
+        """)
+        self.setFixedSize(80, 80) # Tamaño fijo para uniformidad
+        self.setAlignment(Qt.AlignCenter)
+        
+        # Cargar y escalar imagen
+        pixmap = QPixmap(ruta_imagen)
+        if not pixmap.isNull():
+            self.setPixmap(pixmap.scaled(
+                70, 70, Qt.KeepAspectRatio, Qt.SmoothTransformation
+            ))
+        else:
+            self.setText("Logo") # Fallback si no encuentra la imagen
+
+class SeccionInformativa(QWidget):
+    def __init__(self, titulo, logos):
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setSpacing(15)
+        
+        # Título superior
+        lbl_titulo = QLabel(titulo)
+        lbl_titulo.setAlignment(Qt.AlignCenter)
+        lbl_titulo.setStyleSheet("""
+            color: #7f8c8d; 
+            font-weight: bold; 
+            font-size: 10px;
+            letter-spacing: 1px;
+        """)
+        layout.addWidget(lbl_titulo)
+        
+        # Contenedor horizontal para los logos
+        layout_logos = QHBoxLayout()
+        layout_logos.setSpacing(10)
+        layout_logos.addStretch() # Empuja logos al centro
+        for img in logos:
+            layout_logos.addWidget(TarjetaLogo(img))
+        layout_logos.addStretch() # Empuja logos al centro
+        
+        layout.addLayout(layout_logos)
+
+class VentanaFooter(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Footer Estilizado")
+        self.setMinimumWidth(700)
+        #self.setStyleSheet("background-color: #f4f7f6;") # Color de fondo suave
+        
+        # Layout principal horizontal
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(30, 20, 30, 20)
+        
+        # SECCIÓN IZQUIERDA
+        izq = SeccionInformativa(
+            "DESARROLLADO EN COLABORACIÓN CON:",
+            ["./assets/INICTEL-LOGO.jpg", "./assets/cesal-logo.png"] # Cambia por tus rutas
+        )
+        
+        # SEPARADOR VERTICAL (La mejor forma)
+        linea = QFrame()
+        linea.setFrameShape(QFrame.VLine)
+        linea.setFrameShadow(QFrame.Plain)
+        linea.setStyleSheet("color: #d1d1d1;") # Color de la línea
+        linea.setFixedWidth(1)
+        
+        # SECCIÓN DERECHA
+        der = SeccionInformativa(
+            "FINANCIADO POR:",
+            ["./assets/AECID_logo.svg"] # Cambia por tu ruta
+        )
+        
+        # Agregar al layout con proporciones
+        main_layout.addWidget(izq, stretch=2)
+        main_layout.addWidget(linea)
+        main_layout.addWidget(der, stretch=1)
+
 def rounded_top_pixmap(image_path, radius, size):
     """Carga la imagen, la escala completa y le aplica solo esquinas superiores redondeadas."""
     # Escalar manteniendo toda la imagen visible
@@ -412,10 +497,24 @@ class Home(QWidget):
         self.cards_layout.setAlignment(Qt.AlignLeft) 
 
         recientes_layout.addLayout(self.cards_layout)
+        
+        # --Linea Divisora
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        #line.setFrameShadow(QFrame.Sunken)
+        #line.setStyleSheet("background-color: #e0e0e0;") # Gris claro
+        line.setStyleSheet("background-color: #d1d1d1; max-height: 1px; border: none;")
+        line.setFixedHeight(1) # Grosor de 1 píxel
+        
+        footer = VentanaFooter()
         layout.addWidget(title)
         layout.addLayout(buttons_layout)
         #layout.addWidget(analysis_recientes)
         layout.addLayout(recientes_layout)
+        layout.addStretch()
+        #layout.addWidget(line)
+        layout.addWidget(footer)
+        
         self.setLayout(layout)
 
 
