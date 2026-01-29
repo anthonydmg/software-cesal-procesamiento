@@ -253,11 +253,22 @@ class NitrogenDefClassifer:
 
     @classmethod
     def build_cube_and_predict(cls, rgb_path, mask_tree, corner, all_metadata_images):
+
         base = os.path.basename(rgb_path)
-        nir_path   = rgb_path.replace("_D.JPG", "_MS_NIR.TIF")
-        green_path = rgb_path.replace("_D.JPG", "_MS_G.TIF")
-        redge_path = rgb_path.replace("_D.JPG", "_MS_RE.TIF")
-        red_path   = rgb_path.replace("_D.JPG", "_MS_R.TIF")
+
+        if "muitispec_bands" in all_metadata_images[base]:
+            muitispec_bands = all_metadata_images[base]['muitispec_bands']
+            base_dir  = os.path.dirname(rgb_path)
+            nir_path   = os.path.join(base_dir, muitispec_bands['nir'])
+            green_path = os.path.join(base_dir, muitispec_bands['g'])
+            redge_path = os.path.join(base_dir, muitispec_bands['r'])
+            red_path   = os.path.join(base_dir, muitispec_bands['re'])
+        
+        else:
+            nir_path   = rgb_path.replace("_D.JPG", "_MS_NIR.TIF")
+            green_path = rgb_path.replace("_D.JPG", "_MS_G.TIF")
+            redge_path = rgb_path.replace("_D.JPG", "_MS_RE.TIF")
+            red_path   = rgb_path.replace("_D.JPG", "_MS_R.TIF")
 
         nir_basename = os.path.basename(nir_path)
         green_basename = os.path.basename(green_path)

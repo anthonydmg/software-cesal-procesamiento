@@ -1510,7 +1510,7 @@ def match_sames_detects(adj_graph, metadata_images, dom_size):
                 for v, poly_j_v in enumerate(segs_im_dom_j):
                     iou = iou_polygons_mask(poly_i_u, poly_j_v, dom_size, show_intersection = False)
 
-                    if iou > 0.40:
+                    if iou > 0.38:
                         if key_id in same_detects_graph:
                             same_detects_graph[key_id].append([(j,v), dist_to_centers_j[v], iou, poly_j_v, filtered_segmentations_j[v]])
                         else:
@@ -1607,7 +1607,12 @@ def create_map_trees_ids(mosaic_path = None, mosaic_image = None, base_dir = Non
     alpha_overlay = 0.5
 
     COLOR_SALUDABLE = np.array([0, 255, 50], dtype=np.uint8)
-    COLOR_DEFICIENCIA = np.array([0, 247, 191],  dtype=np.uint8)
+
+    COLOR_DEFICIENCIA = np.array([22, 115, 249], dtype=np.uint8)    # BGR
+    COLOR_PRECAUSION  = np.array([8, 179, 234], dtype=np.uint8)     # BGR
+
+    #COLOR_DEFICIENCIA = np.array([249, 115, 22],  dtype=np.uint8)
+    #COLOR_PRECAUSION = np.array([234, 179, 8], dtype=np.uint8)
 
     for r in trees_results:
         xmin, y_min, x_max, y_max = r['bbox']
@@ -1635,7 +1640,14 @@ def create_map_trees_ids(mosaic_path = None, mosaic_image = None, base_dir = Non
 
         roi = mosaic_base[y_min:y_max, xmin:x_max]
         pixeles_base = roi[mask > 0, :3]
-        color_mask = COLOR_DEFICIENCIA if r['class'].upper() == "DEFICIENCIA" else COLOR_SALUDABLE
+        
+        if r['N_class'].upper() == "DEFICIENCIA":
+            color_mask = COLOR_DEFICIENCIA
+        elif r['N_class'].upper() == "PRECAUCIÓN":  
+            color_mask = COLOR_PRECAUSION
+        else:
+            color_mask = COLOR_SALUDABLE
+        
         overlay_pixels = (pixeles_base * (1 - alpha_overlay)) + (color_mask * alpha_overlay)
         
         print("overlay_pixels:",  overlay_pixels.shape)
@@ -1691,6 +1703,135 @@ def create_map_trees_ids(mosaic_path = None, mosaic_image = None, base_dir = Non
 
     path_card_map = f"{base_dir}/mosaic/rgb/card_map.png"
     cv2.imwrite(path_card_map, mosaic_base[:,:,:3])
+    return path_map_trees
+
+
+def create_map_trees_ids_zinc(mosaic_path = None, mosaic_image = None, base_dir = None):
+    if mosaic_image is not None:
+        mosaic_base = mosaic_image
+    elif mosaic_path is not None:
+        mosaic_base = cv2.imread(mosaic_path)
+
+    path_trees_results = f"{base_dir}/mosaic/trees/trees_results.json"
+
+    trees_results = []
+    
+    print("mosaic_base:", mosaic_base.shape)
+    with open(path_trees_results, 'r') as f:
+        trees_results = json.load(f)
+
+    # Definimos colores en BGR
+    try:
+        num_canales = mosaic_base.shape[2]
+    except IndexError:
+        num_canales = 1 # Imagen en escala de grises
+
+    if num_canales == 4:
+        print("Imagen BGRA detectada. Usando colores con canal Alpha.")
+        # [Azul, Verde, Rojo, Alpha] -> Alpha 255 es opaco
+        COLOR_ROJO = (0, 0, 255, 255)
+        COLOR_BLANCO = (255, 255, 255, 255)
+    else:
+        print("Imagen BGR estándar detectada.")
+        COLOR_ROJO = (0, 0, 255)
+        COLOR_BLANCO = (255, 255, 255)
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale_font = 2
+    thickness_font = 2
+    alpha_overlay = 0.5
+
+    COLOR_SALUDABLE = np.array([0, 255, 50], dtype=np.uint8)
+    COLOR_DEFICIENCIA = np.array([22, 115, 249], dtype=np.uint8)    # BGR
+    COLOR_PRECAUSION  = np.array([8, 179, 234], dtype=np.uint8)     # BGR
+
+    for r in trees_results:
+        xmin, y_min, x_max, y_max = r['bbox']
+        x_c = (xmin + x_max) // 2
+        y_c = (y_min + y_max) // 2
+        coord_center = (x_c, y_c)
+        tree_id = r["id"]
+        
+        
+        print("r['mask_path']:", r['mask_path'])
+        mask = cv2.imread(r['mask_path'],cv2.IMREAD_GRAYSCALE)
+        
+        if mask is None:
+            print("Mascara No encontrada")
+            continue
+        
+        print("mask.shape", mask.shape)
+        # 1. Asegurar que la máscara sea 2D
+        if len(mask.shape) == 3:
+            mask = mask.squeeze()
+        print("mask.shape")
+        h, w = mask.shape
+        y_max = y_min + h
+        x_max = xmin + w
+
+        roi = mosaic_base[y_min:y_max, xmin:x_max]
+        pixeles_base = roi[mask > 0, :3]
+        
+        if r['Zn_class'].upper() == "PRECAUCIÓN":  
+            color_mask = COLOR_PRECAUSION
+        else:
+            color_mask = COLOR_SALUDABLE
+        
+        overlay_pixels = (pixeles_base * (1 - alpha_overlay)) + (color_mask * alpha_overlay)
+        
+        print("overlay_pixels:",  overlay_pixels.shape)
+        roi[mask > 0, :3] = overlay_pixels.astype(np.uint8)
+
+        #
+        #overlay = 
+        texto = str(tree_id)
+        
+        (ancho_text, alto_text), linea_base = cv2.getTextSize(texto, font, scale_font, thickness_font)
+
+        # Calculamos la posición de la esquina inferior izquierda del texto para que quede centrado
+        x_text = coord_center[0] - (ancho_text // 2)
+        y_text = coord_center[1] + (alto_text // 2)
+        posicion_text = (x_text, y_text)
+        
+
+        cv2.circle(
+            mosaic_base,
+            coord_center,
+            15,
+            COLOR_ROJO,
+            thickness=-1
+        )
+
+        # Dibujamos el texto
+        cv2.putText(
+            mosaic_base,
+            texto,
+            posicion_text,
+            font,
+            scale_font,
+            COLOR_BLANCO,
+            thickness_font,
+            lineType=cv2.LINE_AA # LINE_AA hace que los bordes del texto se vean suaves
+        )
+
+    path_map_trees = f"{base_dir}/mosaic/rgb/zinc_map_trees_ids.png"
+
+    print("path_map_trees:", path_map_trees)
+    mask_region = np.any(mosaic_base != 0, axis=2)
+    # Coordenadas donde hay datos
+    ys, xs = np.where(mask_region == 1)
+
+    if len(xs) == 0:
+        print("No hay ningún píxel válido en la imagen.")
+    else:
+        x_min, x_max = xs.min(), xs.max()
+        y_min, y_max = ys.min(), ys.max()
+
+    mosaic_base = mosaic_base[y_min: y_max + 1, x_min: x_max + 1, :]
+    cv2.imwrite(path_map_trees, mosaic_base)
+
+    #path_card_map = f"{base_dir}/mosaic/rgb/card_map.png"
+    #cv2.imwrite(path_card_map, mosaic_base[:,:,:3])
     return path_map_trees
 
 class ImageSticher():
@@ -2486,7 +2627,7 @@ class ImageSticher():
         n_batches = n_images // batch_size + (1 if n_images % batch_size > 0 else 0)
         
         images_warped = []
-        ndvi_images_warped = []
+        #ndvi_images_warped = []
         valid_region_masks_warped = []
 
         first_level_bleanding_masks = []
@@ -2503,15 +2644,15 @@ class ImageSticher():
             valid_region = (mosaic_patch.sum(axis=2) > 0).astype(np.uint8) * 255
             valid_region = valid_region.astype(np.uint8)
 
-            ndvi_patch = self.generate_mosaic_ndvi_batch(metadata_rgb_images[start:end], 
-                                                         global_transforms, 
-                                                         bboxes_val_regions, 
-                                                         bleanding_masks, 
-                                                         corners, 
-                                                         all_files_metadata, 
-                                                         dom_size)
+            #ndvi_patch = self.generate_mosaic_ndvi_batch(metadata_rgb_images[start:end], 
+            #                                             global_transforms, 
+            #                                             bboxes_val_regions, 
+            #                                             bleanding_masks, 
+            #                                             corners, 
+            #                                             all_files_metadata, 
+            #                                             dom_size)
             images_warped.append(mosaic_patch)
-            ndvi_images_warped.append(ndvi_patch)
+            #ndvi_images_warped.append(ndvi_patch)
             valid_region_masks_warped.append(valid_region)
 
             first_level_bleanding_masks.extend(bleanding_masks)
@@ -2525,17 +2666,17 @@ class ImageSticher():
             final_mosaic, bleanding_masks, bboxes_val_regions, corners = self.seam_bleanding_process(images_warped, valid_region_masks_warped, dom_size)
 
             ## Bleanding Ndvi images
-            ndvi_cropped = [crop_image(ndvi, bbox) for ndvi, bbox in zip(ndvi_images_warped, bboxes_val_regions)]
-            final_ndvi, _ = self.simple_bleanding(ndvi_cropped, bleanding_masks, corners, dom_size)
+            #ndvi_cropped = [crop_image(ndvi, bbox) for ndvi, bbox in zip(ndvi_images_warped, bboxes_val_regions)]
+            #final_ndvi, _ = self.simple_bleanding(ndvi_cropped, bleanding_masks, corners, dom_size)
 
             if not self.check_continue_procress():
                 return
         else:
             final_mosaic = images_warped[0]
-            final_ndvi = ndvi_images_warped[0]
+            #final_ndvi = ndvi_images_warped[0]
 
         
-        return final_mosaic, final_ndvi, first_level_bleanding_masks, first_level_bboxes_val_regions, first_level_corners
+        return final_mosaic, first_level_bleanding_masks, first_level_bboxes_val_regions, first_level_corners
 
 
     def create_mosaic_batch_seam_blending(self, all_list_images_data, global_transforms, dom_size, save_dir_logs = "./blending"):
@@ -2927,14 +3068,29 @@ class ImageSticher():
             avg_ndvi = detection_result["avg_ndvi"]
             mcari_avg = detection_result["mcari_avg"]
             
+            N_class = diagnosis_class
+            
+            if diagnosis_class == "saludable":
+                if avg_ndvi < 0.70:
+                    N_class = "precaución"
+
+            if mcari_avg > 0.070:
+                Zn_class = "saludable"
+            elif mcari_avg > 0.055:
+                Zn_class = "precaución"
+            else:
+                Zn_class = "posible-problema"
+            
             trees_results.append({
                 "id": i,
                 "bbox": tree_bbox,
                 "mask_path": path_mask,
                 "seg_path": f"{dir_trees}/tree_{x_min}_{y_min}.npy",
-                "class": diagnosis_class,
+                "model_class_N": diagnosis_class,
                 "avg_ndvi": avg_ndvi,
-                "mcari_avg" : mcari_avg
+                "mcari_avg" : mcari_avg,
+                "N_class": N_class,
+                "Zn_class": Zn_class
             })
 
         ## Ordenar y creaar ids
@@ -3118,7 +3274,7 @@ class ImageSticher():
             return
         self.progress_update(40)
         
-        final_mosaic, final_ndvi, first_level_bleanding_masks, first_level_bboxes_val_regions, first_level_corners = self.create_mosaic_rgb_and_layers(
+        final_mosaic, first_level_bleanding_masks, first_level_bboxes_val_regions, first_level_corners = self.create_mosaic_rgb_and_layers(
             metadata_rgb_images,
             H_abs,
             all_images_metadada_dict,
@@ -3170,27 +3326,27 @@ class ImageSticher():
             output_dir = f"{self.result_dir}/mosaic/rgb/tiles", 
             tile_size = 256)
         
-        print("--------------Guardar NDVI Mosaic-----------------")
-        print("--------------Dividiendo en tiles-----------------")
+        #print("--------------Guardar NDVI Mosaic-----------------")
+        #print("--------------Dividiendo en tiles-----------------")
 
-        os.makedirs(f"{self.result_dir}/mosaic/ndvi", exist_ok=True)
-        ndvi_path = f"{self.result_dir}/mosaic/ndvi/ndvi_{name_file}"
+        #os.makedirs(f"{self.result_dir}/mosaic/ndvi", exist_ok=True)
+        #ndvi_path = f"{self.result_dir}/mosaic/ndvi/ndvi_{name_file}"
 
-        self.save_as_geotiff(
-                cv2.cvtColor(final_ndvi, cv2.COLOR_BGR2RGB), 
-                ndvi_path, 
-                dom_bounds[0], dom_bounds[3],  # Esquina superior izquierda (X,Y)
-                dom_resolution,
-                ref_zone_lon
-        )
+        #self.save_as_geotiff(
+        #        cv2.cvtColor(final_ndvi, cv2.COLOR_BGR2RGB), 
+        #        ndvi_path, 
+        #        dom_bounds[0], dom_bounds[3],  # Esquina superior izquierda (X,Y)
+        #        dom_resolution,
+        #        ref_zone_lon
+        #)
 
-        if not self.check_continue_procress():
-            return
+        #if not self.check_continue_procress():
+        #    return
 
-        self._generate_single_zoom_tiles(
-            input_raster = ndvi_path, 
-            output_dir = f"{self.result_dir}/mosaic/ndvi/tiles", 
-            tile_size = 256)
+        #self._generate_single_zoom_tiles(
+        #    input_raster = ndvi_path, 
+        #    output_dir = f"{self.result_dir}/mosaic/ndvi/tiles", 
+        #    tile_size = 256)
         
 
         print("--------------Detectando Arboles Individiales-----------------")
@@ -3241,9 +3397,9 @@ class ImageSticher():
         critical_problem_count_mcari = 0
 
         for tree_result in trees_diagnosis_results:
-            if tree_result["mcari_avg"] > 0.1:
+            if tree_result["mcari_avg"] > 0.08:
                 healthy_count_mcari += 1
-            elif tree_result["mcari_avg"] > 0.07:
+            elif tree_result["mcari_avg"] > 0.05:
                 warning_count_mcari += 1
             else:
                 critical_problem_count_mcari += 1
@@ -3261,6 +3417,7 @@ class ImageSticher():
         mosaic_image[:, :, 3] = alpha
 
         path_map_trees = create_map_trees_ids(mosaic_image = mosaic_image, base_dir = self.result_dir)
+        path_zinc_trees = create_map_trees_ids_zinc(mosaic_image = mosaic_image, base_dir = self.result_dir)
 
         num_images = len(metadata_rgb_images)
         alts = [im_data['relative_altitude'] for im_data in metadata_rgb_images]
@@ -3291,7 +3448,7 @@ class ImageSticher():
 
         processing_sumary = dict(
             mosaic_rgb = mosaic_path,
-            mosaic_ndvi = ndvi_path,
+            #mosaic_ndvi = ndvi_path,
             trees_count = len(unique_detects_trees),
             total_images = len(all_images_metadada_dict),
             avg_alt = avg_alt,
@@ -3299,6 +3456,7 @@ class ImageSticher():
             avg_gsd_multispec = avg_gsd_multispec,
             area_mosaic = area_mosaic,
             map_trees = path_map_trees,
+            zinc_map_trees = path_zinc_trees,
             card_map = path_card_map,
             adquisition_date = fecha_formateada,
             healthy_count_ndvi = healthy_count_ndvi,

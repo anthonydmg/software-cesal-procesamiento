@@ -75,9 +75,9 @@ class VentanaFooter(QWidget):
         # SECCIÓN IZQUIERDA
         izq = SeccionInformativa(
             "DESARROLLADO EN COLABORACIÓN CON:",
-            ["./assets/INICTEL-LOGO.jpg", "./assets/cesal-logo.png"] # Cambia por tus rutas
+            [resource_path(os.path.join("assets", "INICTEL-LOGO.jpg")), resource_path(os.path.join("assets", "cesal-logo.png"))] # Cambia por tus rutas
         )
-        
+            
         # SEPARADOR VERTICAL (La mejor forma)
         linea = QFrame()
         linea.setFrameShape(QFrame.VLine)
@@ -88,7 +88,7 @@ class VentanaFooter(QWidget):
         # SECCIÓN DERECHA
         der = SeccionInformativa(
             "FINANCIADO POR:",
-            ["./assets/AECID_logo.svg"] # Cambia por tu ruta
+            [resource_path(os.path.join("assets", "AECID_logo.svg"))] # Cambia por tu ruta
         )
         
         # Agregar al layout con proporciones
@@ -601,7 +601,7 @@ class Home(QWidget):
 
             self.appdata_manager.add_new_project(project_info)
         
-        dialog.image_data_screen.finished_configure.connect(handle_finished_configure)
+        dialog.finished_configure.connect(handle_finished_configure)
 
         dialog.exec()
     

@@ -31,7 +31,7 @@ EXAMPLE_GENERAL_INFO = [("Nombre del Análisis:", "Análisis de ejemplo 1"),
                     ("Altura Promedio:", "14.92 m"), 
                     ("Fecha de Captura:", "2024-08-12")]
 
-EXAMPLE_DATOS_ARBOLES = [{"id": i, "diagnostico": "POSIBLE DEFICIENCIA" if i in [2,11,15,19] else "SALUDABLE", "ndvi": f"{0.65 if i in [2,11,15,19] else 0.80 + i*0.01:.2f}"} for i in range(1, 51)]
+EXAMPLE_DATOS_ARBOLES = [{"id": i, "N_diagnostico": "POSIBLE DEFICIENCIA" if i in [2,11,15,19] else "SALUDABLE", "ndvi": f"{0.65 if i in [2,11,15,19] else 0.80 + i*0.01:.2f}"} for i in range(1, 51)]
 
 EXAMPLE_COMENTARIOS = "Se sugiere revisión en campo."
 EXAMPLE_MAP_IMAGE = "20250819_184004.tif"
@@ -117,55 +117,10 @@ def dibujar_pagina_final_a3(canvas, doc, mapa_image, page_size):
         
     canvas.restoreState()
 
-def crear_reporte(filename,
-                  general_info,
-                  trees_data,
-                  comments,
-                  map_image,
-                  final_page_size = None):
-    # Márgenes ajustados (topMargin alto para logos)
-    doc = SimpleDocTemplate(filename, pagesize=A4, 
-                            rightMargin=30, leftMargin=30, 
-                            topMargin=70, bottomMargin=30)
-    
-    # --- DEFINICIÓN EXPLÍCITA DE PLANTILLAS ---
-    
-    # 1. Plantilla NORMAL (A4): La definimos explícitamente primero.
-    # Usamos un Frame que respete los márgenes del doc
-    frame_a4 = Frame(doc.leftMargin, doc.bottomMargin, doc.width, doc.height, id='normal')
-    template_a4 = PageTemplate(id='Normal', frames=[frame_a4], onPage=dibujar_pagina_a4, pagesize = A4)
-    
-    # 2. Plantilla GIGANTE (A3): Para la última página
-    ancho_a3, alto_a3 = landscape(A3)
-    
-    frame_a3 = Frame(0, 0, ancho_a3, alto_a3, id='FrameA3', showBoundary=0)
-    
-    if final_page_size:
-        on_page_A3_map = lambda canvas, doc: dibujar_pagina_final_a3(canvas, doc, map_image, final_page_size)
-
-        template_a3 = PageTemplate(id='PlantillaMapaGigante', frames=[frame_a3], onPage=on_page_A3_map, pagesize=landscape(A3))
-        
-        # Agregamos AMBAS plantillas. Al poner 'template_a4' primero, será la default.
-        doc.addPageTemplates([template_a4, template_a3])
-    else:
-        doc.addPageTemplates([template_a4])
-
-    elements = []
-    styles = getSampleStyleSheet()
-
-    # --- CONTENIDO DEL REPORTE (A4) ---
-    
-    # ... Datos ...
-   
-    # ... Títulos y Tablas ...
-    title_style = ParagraphStyle('MainTitle', parent=styles['Heading1'], textColor=COLOR_AZUL_OSCURO, alignment=1, fontSize=14, spaceAfter=20)
-    elements.append(Paragraph("INFORME DE ANÁLISIS BASADO EN IMÁGENES", title_style))
-    elements.append(Spacer(1, 12))
-    
-    header_section_style = ParagraphStyle('SectionTitle', parent=styles['Heading2'], textColor=COLOR_AZUL_OSCURO, fontSize=12, spaceAfter=5)
+def add_information_section(general_info, elements, header_section_style, t_line):
     elements.append(Paragraph("I. INFORMACIÓN GENERAL", header_section_style))
-    t_line = Table([[""]], colWidths=[530], rowHeights=[2])
-    t_line.setStyle(TableStyle([('LINEBELOW', (0,0), (-1,-1), 1, COLOR_AZUL_OSCURO)]))
+    # t_line = Table([[""]], colWidths=[530], rowHeights=[2])
+    # t_line.setStyle(TableStyle([('LINEBELOW', (0,0), (-1,-1), 1, COLOR_AZUL_OSCURO)]))
     elements.append(t_line)
     elements.append(Spacer(1, 15))
 
@@ -177,6 +132,8 @@ def crear_reporte(filename,
     elements.append(t_info)
 
     elements.append(Spacer(1, 30))
+
+def add_results_table_section(trees_data, elements, header_section_style, t_line):
     elements.append(Paragraph("II. RESULTADOS DEL ANÁLISIS", header_section_style))
     elements.append(t_line) 
     elements.append(Spacer(1, 15))
@@ -188,9 +145,9 @@ def crear_reporte(filename,
         row_ids, row_diag, row_ndvi, orange_cols = [], [], [], []
         for idx, item in enumerate(chunk):
             row_ids.append(str(item['id']))
-            row_diag.append(item['diagnostico'])
+            row_diag.append(item['N_diagnostico'])
             row_ndvi.append(str(item['ndvi']))
-            if item['diagnostico'] == "POSIBLE DEFICIENCIA": orange_cols.append([idx, 1])
+            if item['N_diagnostico'] != "SALUDABLE": orange_cols.append([idx, 1])
             if float(item["ndvi"]) < 0.75: orange_cols.append([idx, 2])
         while len(row_ids) < columnas_por_fila:
             row_ids.append(""); row_diag.append(""); row_ndvi.append("")
@@ -205,7 +162,9 @@ def crear_reporte(filename,
         elements.append(Spacer(1, 10))
 
     elements.append(PageBreak())
-    elements.append(Paragraph("III. MAPA DE ÁRBOLES", header_section_style))
+
+def add_map_trees_def_n_section(trees_data, map_image, elements, styles, header_section_style, t_line):
+    elements.append(Paragraph("III. MAPA DE ÁRBOLES CON POSIBLES DEFICIENCIAS DE NITRÓGENO", header_section_style))
     elements.append(t_line)
     elements.append(Spacer(1, 15))
     
@@ -216,7 +175,110 @@ def crear_reporte(filename,
         imagen_mapa.hAlign = 'CENTER'
         elements.append(imagen_mapa)
     except: pass
+    elements.append(Spacer(1, 20))
+    # =========================================================================
+    # NUEVO: TARJETA DE "ANALYSIS BREAKDOWN" (Dinámica)
+    # =========================================================================
 
+    # 1. Calcular Estadísticas basándonos en trees_data
+    total_trees = len(trees_data)
+    deficient_count = 0
+    warning_count = 0
+    
+    for item in trees_data:
+        diag = item.get('N_diagnostico', '')
+        if diag == "POSIBLE DEFICIENCIA":
+            deficient_count += 1
+        elif diag == "PRECAUCIÓN":
+            warning_count += 1
+
+            
+    healthy_count = total_trees - deficient_count - warning_count
+    
+    # Calcular porcentajes (evitando división por cero)
+    healthy_pct = f"{round((healthy_count/total_trees)*100)}%" if total_trees > 0 else "0%"
+    warning_pct = f"{round((warning_count/total_trees)*100)}%" if total_trees > 0 else "0%"
+    deficient_pct = f"{round((deficient_count/total_trees)*100)}%" if total_trees > 0 else "0%"
+
+    # 2. Definir Estilos Locales para la tarjeta
+    # Título de la tarjeta
+    style_card_header = ParagraphStyle('CardHead', parent=styles['Normal'], fontSize=11, fontName='Helvetica-Bold', spaceAfter=6)
+    # Texto de etiquetas
+    style_card_label = ParagraphStyle('CardLbl', parent=styles['Normal'], fontSize=10, textColor=colors.black)
+    # Texto de valores (alineado a derecha)
+    style_card_value = ParagraphStyle('CardVal', parent=styles['Normal'], fontSize=10, textColor=colors.black, alignment=2)
+
+    # 3. Crear los elementos visuales
+    dot_green = create_dot("#28a745")   # Verde
+    dot_yellow = create_dot("#eab308")  # Amarillo/Naranja
+    dot_orange = create_dot("#F97316")
+    
+    # Textos
+    p_header = Paragraph("<b>Distribución de Árboles con Posibles Deficiencias de Nitrogeno</b>", style_card_header)
+    
+    p_lbl_healthy = Paragraph("Saludable", style_card_label)
+    p_val_healthy = Paragraph(f"<b>{healthy_count} Árboles ({healthy_pct})</b>", style_card_value)
+
+    p_lbl_warn = Paragraph("Precaución", style_card_label)
+    p_val_warn = Paragraph(f"<b>{warning_count} Árboles ({warning_pct})</b>", style_card_value)
+
+    p_lbl_def = Paragraph("Con Posible Deficiencia", style_card_label)
+    p_val_def = Paragraph(f"<b>{deficient_count} Árboles ({deficient_pct})</b>", style_card_value)
+
+
+    # 4. Armar la data de la Tabla
+    # Estructura: [Header], [Green, Label, Val], [Yellow, Label, Val]
+    card_data = [
+        [p_header, '', ''], 
+        [dot_green, p_lbl_healthy, p_val_healthy],
+        [dot_yellow, p_lbl_warn, p_val_warn],
+        [dot_orange, p_lbl_def, p_val_def]
+    ]
+
+    # 5. Crear Tabla y Estilos
+    # Anchos: Columna pequeña para el punto, espacio para texto, columna para valor
+    t_breakdown = Table(card_data, colWidths=[8*mm, 60*mm, 50*mm], hAlign='LEFT')
+
+    t_breakdown.setStyle(TableStyle([
+        # General
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('BACKGROUND', (0,0), (-1,-1), colors.white),
+        
+        # Header (Fila 0)
+        ('SPAN', (0,0), (-1,0)), # Fusionar columnas
+        ('BOTTOMPADDING', (0,0), (-1,0), 8),
+        ('LINEBELOW', (0,0), (-1,0), 1, colors.HexColor("#dcdcdc")), # Línea gris fina
+        
+        # Filas de datos
+        ('TOPPADDING', (0,1), (-1,-1), 8),
+        ('BOTTOMPADDING', (0,1), (-1,-1), 8),
+        
+        # Línea divisoria entre Healthy y Deficient
+        ('LINEBELOW', (0,1), (-1,1), 1, colors.HexColor("#dcdcdc")),
+
+        # Borde exterior (Caja verde suave)
+        ('BOX', (0,0), (-1,-1), 1, colors.HexColor("#A8D5BA")),
+    ]))
+
+    elements.append(t_breakdown)
+
+    elements.append(Spacer(1, 30))
+    elements.append(PageBreak())
+
+
+def add_map_trees_def_zn_section(trees_data, map_image, elements, styles, header_section_style, t_line):
+    elements.append(Paragraph("IV. MAPA DE ÁRBOLES CON POSIBLES PROBLEMAS ASOCIADOS  ZINC", header_section_style))
+    elements.append(t_line)
+    elements.append(Spacer(1, 15))
+    
+    try:
+        utils_img = ImageReader(map_image)
+        aspect = utils_img.getSize()[1] / float(utils_img.getSize()[0])
+        imagen_mapa = Image(map_image, width=500, height=500 * aspect)
+        imagen_mapa.hAlign = 'CENTER'
+        elements.append(imagen_mapa)
+    except: pass
+    elements.append(Spacer(1, 20))
     # =========================================================================
     # NUEVO: TARJETA DE "ANALYSIS BREAKDOWN" (Dinámica)
     # =========================================================================
@@ -227,9 +289,8 @@ def crear_reporte(filename,
     
     # Usamos la misma lógica que usaste para las filas naranjas
     for item in trees_data:
-        ndvi_val = float(item.get('ndvi', 0))
-        diag = item.get('diagnostico', '')
-        if diag == "POSIBLE DEFICIENCIA" or ndvi_val < 0.75:
+        diag = item.get('Zn_class', '')
+        if diag!= "saludable":
             deficient_count += 1
             
     healthy_count = total_trees - deficient_count
@@ -248,16 +309,17 @@ def crear_reporte(filename,
 
     # 3. Crear los elementos visuales
     dot_green = create_dot("#28a745")   # Verde
-    dot_yellow = create_dot("#BFF700")  # Amarillo/Naranja
+    dot_yellow = create_dot("#eab308")  # Amarillo/Naranja
     
     # Textos
-    p_header = Paragraph("<b>Distribución de Árboles</b>", style_card_header)
+    p_header = Paragraph("<b>Distribución de Árboles con Posibles Problemas de Zinc</b>", style_card_header)
     
     p_lbl_healthy = Paragraph("Saludable", style_card_label)
     p_val_healthy = Paragraph(f"<b>{healthy_count} Árboles ({healthy_pct})</b>", style_card_value)
     
-    p_lbl_def = Paragraph("Con Deficiencia", style_card_label)
+    p_lbl_def = Paragraph("Precaucion", style_card_label)
     p_val_def = Paragraph(f"<b>{deficient_count} Árboles ({deficient_pct})</b>", style_card_value)
+
 
     # 4. Armar la data de la Tabla
     # Estructura: [Header], [Green, Label, Val], [Yellow, Label, Val]
@@ -295,9 +357,75 @@ def crear_reporte(filename,
     elements.append(t_breakdown)
 
     elements.append(Spacer(1, 30))
-    elements.append(Paragraph("IV. COMENTARIOS", header_section_style))
+
+def add_comment_section(comments, elements, styles, header_section_style, t_line):
+    elements.append(Paragraph("V. COMENTARIOS", header_section_style))
     elements.append(t_line)
     elements.append(Paragraph(comments, ParagraphStyle('C', parent=styles['Normal'], alignment=4)))
+
+def crear_reporte(filename,
+                  general_info,
+                  trees_data,
+                  comments,
+                  map_image,
+                  zinc_map_image,
+                  final_page_size = None):
+    # Márgenes ajustados (topMargin alto para logos)
+    doc = SimpleDocTemplate(filename, pagesize=A4, 
+                            rightMargin=30, leftMargin=30, 
+                            topMargin=70, bottomMargin=30)
+    
+    # --- DEFINICIÓN EXPLÍCITA DE PLANTILLAS ---
+    
+    # 1. Plantilla NORMAL (A4): La definimos explícitamente primero.
+    # Usamos un Frame que respete los márgenes del doc
+    frame_a4 = Frame(doc.leftMargin, doc.bottomMargin, doc.width, doc.height, id='normal')
+    template_a4 = PageTemplate(id='Normal', frames=[frame_a4], onPage=dibujar_pagina_a4, pagesize = A4)
+    
+    # 2. Plantilla GIGANTE (A3): Para la última página
+    ancho_a3, alto_a3 = landscape(A3)
+    
+    frame_a3 = Frame(0, 0, ancho_a3, alto_a3, id='FrameA3', showBoundary=0)
+    
+    if final_page_size:
+        on_page_A3_map = lambda canvas, doc: dibujar_pagina_final_a3(canvas, doc, map_image, final_page_size)
+
+        template_a3 = PageTemplate(id='PlantillaMapaGigante', frames=[frame_a3], onPage=on_page_A3_map, pagesize=landscape(A3))
+        
+        # Agregamos AMBAS plantillas. Al poner 'template_a4' primero, será la default.
+        doc.addPageTemplates([template_a4, template_a3])
+    else:
+        doc.addPageTemplates([template_a4])
+
+    elements = []
+    styles = getSampleStyleSheet()
+
+    # --- CONTENIDO DEL REPORTE (A4) ---
+    
+    # ... Títulos y Tablas ...
+    title_style = ParagraphStyle('MainTitle', parent=styles['Heading1'], textColor=COLOR_AZUL_OSCURO, alignment=1, fontSize=14, spaceAfter=20)
+    elements.append(Paragraph("INFORME DE ANÁLISIS BASADO EN IMÁGENES", title_style))
+    elements.append(Spacer(1, 12))
+    
+    header_section_style = ParagraphStyle('SectionTitle', parent=styles['Heading2'], textColor=COLOR_AZUL_OSCURO, fontSize=12, spaceAfter=5)
+    t_line = Table([[""]], colWidths=[530], rowHeights=[2])
+    t_line.setStyle(TableStyle([('LINEBELOW', (0,0), (-1,-1), 1, COLOR_AZUL_OSCURO)]))
+    
+    # I. INFORMACIÓN GENERAL
+    add_information_section(general_info, elements, header_section_style, t_line)
+
+    # II. RESULTADOS DEL ANÁLISIS
+    add_results_table_section(trees_data, elements, header_section_style, t_line)
+
+    # III. MAPA DE ÁRBOLES CON POSIBLES DEFICIENCIAS DE NITRÓGENO
+    add_map_trees_def_n_section(trees_data, map_image, elements, styles, header_section_style, t_line)
+
+    # IV. MAPA DE ÁRBOLES CON POSIBLES DEFICIENCIAS DE ZINC
+
+    add_map_trees_def_zn_section(trees_data, zinc_map_image, elements, styles, header_section_style, t_line)
+
+    # V. COMENTARIOS
+    add_comment_section(comments, elements, styles, header_section_style, t_line)
 
     # --- TRANSICIÓN A PÁGINA A3 ---
     if final_page_size:

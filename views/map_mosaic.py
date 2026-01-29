@@ -31,6 +31,10 @@ class ColorTreeState:
             "color_hex": "#00FF32",
             "color_rgb": (0, 255, 50)
         },
+        "PRECAUCIÓN": {
+            "color_hex": "#eab308",
+            "color_rgb": (234, 179, 8)
+        },
         "DEFICIENCIA": {
             "color_hex": "#F97316",
             "color_rgb": (249, 115, 22)
@@ -140,10 +144,11 @@ class ColorMcari:
 
         color_scale = [
             # --- RANGO 0.0 a 1 (Dividido en  partes) ---
-            (0.0, 0.07, color_dark_orange, color_yellow),
-            (0.07, 0.085 , color_soft_orange, color_yellow),
-            (0.085, 0.10 , color_yellow, color_lime),
-            (0.10, 0.25, color_lime, color_green),
+            (-0.2, 0.0, color_red, color_dark_orange),
+            (0.0, 0.05, color_dark_orange, color_yellow),
+            (0.05, 0.065 , color_soft_orange, color_yellow),
+            (0.065, 0.08 , color_yellow, color_lime),
+            (0.08, 0.25, color_lime, color_green),
         ]
 
         for low, high, c_low, c_high in color_scale:
@@ -303,9 +308,17 @@ class PdfGeneratorWorker(QThread):
         trees_data = []
         
         for r in trees_results:
+            
+            if r["N_class"] == "deficiencia":
+                N_diagnostico = "POSIBLE DEFICIENCIA"
+            elif r["N_class"] == "precaución":
+                N_diagnostico = "PRECAUCIÓN"
+            else:
+                N_diagnostico = "SALUDABLE"
+
             trees_data.append(dict(
                 id = r["id"], 
-                diagnostico = "POSIBLE DEFICIENCIA" if r['class'] == "deficiencia" else "SALUDABLE",
+                N_diagnostico = N_diagnostico,
                 ndvi = round(r['avg_ndvi'], 2)
                 ))
         
@@ -402,6 +415,7 @@ class PdfGeneratorWorker(QThread):
                 trees_data= trees_data,
                 comments = self.data['comentarios'],
                 map_image= sumary_processing['map_trees'] if sumary_processing else None,
+                zinc_map_image= sumary_processing['zinc_map_trees'] if sumary_processing else None,
                 final_page_size = self.data["formato"] if self.data['incl_mapa'] else None)
 
             #with open(temp_pdf, "wb") as f:
@@ -1197,14 +1211,14 @@ class GeoTIFFViewer(QWidget):
             }
         """)
 
-        self.layers_menu.setFixedSize(340, 120)
+        self.layers_menu.setFixedSize(330, 120)
         self.layers_menu.hide()  # Oculto por defecto
 
         layout_layers = QVBoxLayout(self.layers_menu)
 
         #self.rb_ndvi = QRadioButton("MAPA NDVI")
         self.rb_mapa = QRadioButton("MAPA")
-        self.rb_def = QRadioButton("MAPA DE DEFICIENCIAS")
+        self.rb_def = QRadioButton("MAPA DE DEFICIENCIAS ASOCIADAS A NITROGENO")
         self.rb_ndvi_avg = QRadioButton("MAPA NDVI PROMEDIO")
         self.rb_mcari_avg = QRadioButton("MAPA MCARI PROMEDIO (ASOCIADO DEF. ZINC)")
         #self.rb_ndvi.setStyleSheet("""
@@ -1355,9 +1369,9 @@ class GeoTIFFViewer(QWidget):
             trees_r['corner'] = [x_pos, y_pos]
             trees_r['qbbox'] = QRectF(x_pos, y_pos, width, height)
             trees_r['mask'] = mask
-
+            
             # Items de mascaras de deficiencias
-            tree_class = trees_r['class']
+            tree_class = trees_r['N_class']
             color_class = ColorTreeState.get_rgb(tree_class)
 
             # Agregar transparencia
@@ -1390,6 +1404,7 @@ class GeoTIFFViewer(QWidget):
             # Items de mascaras de mcari promedio
             mcari_avg = trees_r["mcari_avg"]
 
+            print("mcari_avg:", mcari_avg)
             color_mcari = ColorMcari.get_color(mcari_avg)
             color_mcari = color_mcari + [200]
             qimage_mcari = self.mask_to_qimage(mask = mask, color_mask = color_mcari)
@@ -1639,7 +1654,7 @@ class GeoTIFFViewer(QWidget):
         hovered_mask["hover_item"].setVisible(True)
 
         # 6. Tooltip solo cuando cambia de máscara
-        class_str = hovered_mask['class']
+        class_str = hovered_mask['N_class']
         avg_ndvi = round(hovered_mask["avg_ndvi"], 3)
         mcari_avg = round(hovered_mask["mcari_avg"], 3)
         state = class_str.capitalize() if class_str.upper() == "SALUDABLE" else "Con " + class_str.capitalize()
@@ -1912,7 +1927,7 @@ class TitleResults(QWidget):
         self.name_analysis_title.setAlignment(Qt.AlignLeft)
 
         # Subtítulo
-        subtitle = QLabel("Resultados del Análisis")
+        subtitle = QLabel("Resultados del Análisis de Imágenes")
         subtitle.setStyleSheet("""
             color: #626263;
             padding: 5px 10px;
@@ -2098,16 +2113,22 @@ class DonutChartWidget(QWidget):
         start_angle = 0#90 * 48
 
         healthy_angle = int(360 * (self.percentage_healthy / 100) * 16)
+        warning_angle = int(360 * (self.percentage_warning / 100) * 16)
         deficient_angle = int(360 * (self.percentage_deficient / 100) * 16)
-
+        
         # HEALTHY (verde)
         p.setPen(Qt.NoPen)
         p.setBrush(QColor("#22A529"))
         p.drawPie(rect, start_angle, healthy_angle)
 
+        #"#eab308" 
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#eab308"))
+        p.drawPie(rect, start_angle + healthy_angle, warning_angle)
+
         # DEFICIENT (amarillo)
         p.setBrush(QColor("#F97316"))
-        p.drawPie(rect, start_angle + healthy_angle, deficient_angle)
+        p.drawPie(rect, start_angle + warning_angle + healthy_angle, deficient_angle)
 
         # ========================
         # agujero interior (donut)
@@ -2158,12 +2179,15 @@ class DonutChartWidget(QWidget):
     # =================================================
     #       ACTUALIZAR VALORES EXTERNAMENTE
     # =================================================
-    def update_values(self, healthy, deficient):
+    def update_values(self, healthy = 0, warning = 10, deficient = 0):
         self.healthy = healthy
         self.deficient = deficient
         
-        self.percentage_healthy = round(healthy * 100 / (healthy + deficient), 2) 
-        self.percentage_deficient = round(deficient * 100 / (healthy + deficient),2) 
+        total = healthy + deficient + warning
+
+        self.percentage_healthy = round(healthy * 100 / total, 2)
+        self.percentage_warning = round(warning * 100 / total, 2)  
+        self.percentage_deficient = round(deficient * 100 / total, 2) 
         self.update()
 
 
@@ -2201,8 +2225,8 @@ class StatCountWidget(QWidget):
         
         # Agregar todo al layout principal
         layout.addLayout(header_layout)
-        layout.addWidget(self.percent_label)
-        layout.addWidget(self.count_label)
+        layout.addWidget(self.percent_label, alignment=Qt.AlignCenter)
+        layout.addWidget(self.count_label, alignment=Qt.AlignCenter)
     
     def update_stat(self, count, percentage):
         self.percent_label.setText(f"{percentage}%")
@@ -2216,25 +2240,36 @@ class StatsDeficiency(QWidget):
         self.setWindowTitle("Dashboard Stats")
         self.setStyleSheet("background-color: white;") # Fondo blanco como en la imagen
         
-        main_layout = QHBoxLayout(self)
-        main_layout.setContentsMargins(20, 20, 20, 20)
-        main_layout.setSpacing(40) # Espacio entre los dos bloques
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(0) # Espacio entre los dos bloques
 
         # Bloque Saludable (Verde)
+        ## 
+        row_layout = QHBoxLayout()
+        
         self.saludable = StatCountWidget("#108548", "Saludable", "0.0%", 0)
         
-        # Bloque Deficiencia (Amarillo/Naranja)
-        self.deficiencia = StatCountWidget("#F97316", "Deficiencia", "0.0%", 0)
+        self.precausion = StatCountWidget("#eab308", "Precaución", "0.0%", 0)
 
-        main_layout.addWidget(self.saludable)
-        main_layout.addWidget(self.deficiencia)
-        main_layout.addStretch()
+        row_layout.addWidget(self.saludable)
+        row_layout.addStretch(25)
+        row_layout.addWidget(self.precausion)
+        # Bloque Deficiencia (Amarillo/Naranja)
+        self.deficiencia = StatCountWidget("#F97316", "Posible Deficiencia", "0.0%", 0)
+
+        main_layout.addLayout(row_layout)
+        main_layout.addWidget(self.deficiencia, alignment=Qt.AlignCenter)
+        #main_layout.addStretch()
     
-    def update_stats(self, num_healty, num_deficency):
-        percentage_healthy = round(num_healty * 100 / (num_healty + num_deficency), 2) 
-        percentage_deficient = round(num_deficency * 100 / (num_healty + num_deficency),2) 
+    def update_stats(self, num_healthy, num_prec_trees, num_deficency):
+        total = num_healthy + num_prec_trees + num_deficency
+        percentage_healthy = round(num_healthy * 100 / total, 2) 
+        percentage_warning = round(num_prec_trees * 100 / total,2) 
+        percentage_deficient = round(num_deficency * 100 / total,2) 
         
-        self.saludable.update_stat(num_healty, percentage_healthy)
+        self.saludable.update_stat(num_healthy, percentage_healthy)
+        self.precausion.update_stat(num_prec_trees, percentage_warning)
         self.deficiencia.update_stat(num_deficency, percentage_deficient)
 
 
@@ -2493,7 +2528,7 @@ class MCARIScaleCard(QFrame):
         scale_layout.setSpacing(0)
         
         # Etiquetas numéricas
-        labels_vals = ["0.25", "0.1", "0.07", "0.0"]
+        labels_vals = ["0.25", "0.8", "0.055", "0.0"]
         for i, val in enumerate(labels_vals):
             lbl = QLabel(val)
             lbl.setStyleSheet(f"color: #adb5bd; font-weight: bold; font-size: 11px; margin-right: 8px;")
@@ -2550,9 +2585,9 @@ class MCARIScaleCard(QFrame):
         legend_layout.setContentsMargins(0,0,0,0)
 
         # Crear los items usando nuestra clase reutilizable
-        self.item1 = LegendItemVI(COLOR_GREEN, "SALUDABLE", num_health, "> 0.1")
-        self.item2 = LegendItemVI(COLOR_YELLOW, "PRECAUCIÓN", num_warning, "0.07 - 0.1")
-        self.item4 = LegendItemVI(COLOR_RED, "CONDICIÓN CRÍTICA", num_critical_problem, "< 0.07")
+        self.item1 = LegendItemVI(COLOR_GREEN, "SALUDABLE", num_health, "> 0.8")
+        self.item2 = LegendItemVI(COLOR_YELLOW, "PRECAUCIÓN", num_warning, "0.055 - 0.8")
+        self.item4 = LegendItemVI(COLOR_RED, "CONDICIÓN CRÍTICA", num_critical_problem, "< 0.055")
         
         legend_layout.addWidget(self.item1)
         legend_layout.addWidget(self.item2)
@@ -2702,12 +2737,13 @@ class RightPanelResults(QWidget):
             with open(trees_results_path, "r") as f:
                 trees_result = json.load(f)
 
-            sal_trees = [ r for r in trees_result if r['class'] == "saludable"]
-            def_trees = [ r for r in trees_result if r['class'] == "deficiencia"]
+            sal_trees = [ r for r in trees_result if r['N_class'] == "saludable"]
+            prec_trees = [r for r in trees_result if r['N_class'] == "precaución"]
+            def_trees = [ r for r in trees_result if r['N_class'] == "deficiencia"]
 
             self.count_trees_card.update_count(len(trees_result))
-            self.container_stats.diagram_widget.update_values(healthy = len(sal_trees), deficient = len(def_trees))
-            self.container_stats.stats_defs.update_stats(len(sal_trees), len(def_trees))
+            self.container_stats.diagram_widget.update_values(healthy = len(sal_trees), warning= len(prec_trees), deficient = len(def_trees))
+            self.container_stats.stats_defs.update_stats(len(sal_trees), len(prec_trees), len(def_trees))
 
         process_summary_path = f"{result_dir}/processing_sumary.json"
 

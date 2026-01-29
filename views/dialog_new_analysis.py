@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QApplication, QDialog, QStackedWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QFileDialog, QFrame, QListWidget, QProgressBar, QTableWidget, QScrollArea, QTableWidgetItem
+from PySide6.QtWidgets import QApplication, QDialog, QStackedWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QFileDialog, QFrame, QListWidget, QProgressBar, QTableWidget, QScrollArea, QTableWidgetItem, QWidget, QComboBox
 from PySide6.QtCore import Qt, Signal, QObject, Slot, QThread
 import os
 import numpy as np
@@ -438,6 +438,7 @@ class ImageSelectionScreen(QFrame):
         self.qthread.start()
 
         return None
+    
     def on_all_metadata_ready(self, metadata_list):
         self.next_button.setEnabled(True)
         for idx, metadata in enumerate(metadata_list):
@@ -503,6 +504,7 @@ class ImageDataTableScreen(QFrame):
         self.table.setRowCount(0)
         self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels(["Nombre","Ancho","Alto", "Latitud", "Longitud", "Ángulo Yaw", "Ángulo Pitch", "Ángulo Roll", "Fecha"])
+        self.table.setColumnWidth(0, 220)  # El primer parámetro es el índice (0), el segundo los píxeles
         #self.add_image_data()
 
         # Crear un área de desplazamiento para la tabla
@@ -561,7 +563,7 @@ class ImageDataTableScreen(QFrame):
         self.back_button.clicked.connect(self.go_back_to_image_selection)
         button_layout.addWidget(self.back_button)
 
-        self.finished_button = QPushButton('Finalizar')
+        self.finished_button = QPushButton('Siguiente >')
         self.finished_button.clicked.connect(self.finish_configure)
         button_layout.addWidget(self.finished_button)
 
@@ -612,7 +614,8 @@ class ImageDataTableScreen(QFrame):
     #             self.table.setItem(row_position, column, QTableWidgetItem(value))
 
     def finish_configure(self):
-        self.finished_configure.emit()
+        
+        #self.finished_configure.emit()
         ## Aqui guardar datos en json
         ## self.new_analysis_data_store.images_data
         
@@ -631,10 +634,12 @@ class ImageDataTableScreen(QFrame):
         
         #self.save_configure_analysis(base_dir, config)
 
-        if isinstance(self.dialog_parent, QDialog):
-            self.dialog_parent.accept()  
-        else:
-            self.dialog_parent.close()
+        self.dialog_parent.go_to_manager_multi_specs_bands()
+
+        #if isinstance(self.dialog_parent, QDialog):
+        #    self.dialog_parent.accept()  
+        #else:
+        #    self.dialog_parent.close()
     
     def save_configure_analysis(self, base_dir, data):
         import json
@@ -658,11 +663,277 @@ class AnalysisData:
     def set_name(self, name):
         self.name = name
 
+
+# --- NUEVA CONFIGURACIÓN DE ANCHOS ---
+# [Index, RGB, Roja, Verde, NIR, Red Edge, Eliminar]
+COL_WIDTHS = [50, 195, 230, 230, 230, 230, 60]
+
+class BandSelector(QComboBox):
+    def __init__(self, w = 225):
+        super().__init__()
+        # Los hacemos un poco más anchos ahora que hay más espacio
+        self.options = []
+        self.setFixedWidth(w)
+        self.addItem("Selección...")
+        self.setStyleSheet("""
+            QComboBox {
+                border: 1px solid #D1D5DB;
+                border-radius: 6px;
+                padding: 6px;
+                background-color: white;
+            }
+            QComboBox::drop-down { border: none; }
+        """)
+    def update_options(self, options):
+        self.options = options
+        self.clear()
+        self.addItems(["Selección..."] + options)
+    
+
+class CaptureRow(QFrame):
+    def __init__(self, index, is_new=False):
+        super().__init__()
+        self.setFixedHeight(70)
+        self.setObjectName("FilaCaptura")
+        
+        self.setStyleSheet("""
+            #FilaCaptura {
+                border-bottom: 1px solid #F3F4F6;
+                background-color: white;
+            }
+            #FilaCaptura:hover {
+                background-color: #F9FAFB;
+            }
+        """)
+        
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(20, 0, 20, 0)
+        layout.setSpacing(10)
+
+        # 1. Índice
+        #lbl_idx = QLabel("New" if is_new else str(index))
+        #lbl_idx.setFixedWidth(COL_WIDTHS[0])
+        #lbl_idx.setStyleSheet("color: #3B82F6; font-weight: bold; border: none;" if is_new else "color: #9CA3AF; border: none;")
+        #layout.addWidget(lbl_idx)
+
+        # 2. Columnas de Bandas (Empezando por RGB)
+        # Creamos 5 selectores para: RGB, Roja, Verde, NIR, Red Edge
+        
+        self.rgb_band_cb = BandSelector(w=190)
+        self.red_band_cb = BandSelector()
+        self.green_band_cb = BandSelector()
+        self.nir_band_cb = BandSelector()
+        self.re_band_cb = BandSelector()
+        
+        layout.addWidget(self.rgb_band_cb)
+        layout.addWidget(self.red_band_cb)
+        layout.addWidget(self.green_band_cb)
+        layout.addWidget(self.nir_band_cb)
+        layout.addWidget(self.re_band_cb)
+        #for _ in range(5):
+        #    cb = BandSelector()
+        #    layout.addWidget(cb)
+
+        # 3. Icono de Eliminar (Tacho)
+        self.btn_delete = QPushButton("🗑️")
+        self.btn_delete.setFixedWidth(COL_WIDTHS[6])
+        self.btn_delete.setCursor(Qt.PointingHandCursor)
+        self.btn_delete.setStyleSheet("""
+            QPushButton {
+                color: #EF4444;
+                border: none;
+                background: transparent;
+                font-size: 18px;
+            }
+            QPushButton:hover { color: #B91C1C; }
+        """)
+        self.btn_delete.clicked.connect(self.deleteLater)
+        layout.addWidget(self.btn_delete)
+    
+    def get_values_row(self):
+        return [self.rgb_band_cb.currentText(),
+                self.red_band_cb.currentText(),
+                self.green_band_cb.currentText(),
+                self.nir_band_cb.currentText(),
+                self.re_band_cb.currentText(),
+                ]
+
+    def update_options(self, rgb_images, red_images, green_images, nir_images, re_images):
+        self.rgb_band_cb.update_options(rgb_images)
+        self.red_band_cb.update_options(red_images)
+        self.green_band_cb.update_options(green_images)
+        self.nir_band_cb.update_options(nir_images)
+        self.re_band_cb.update_options(re_images)
+        self.update()
+
+class ManagerMultiSpecBanbScreen(QFrame):
+    def __init__(self, dialog_parent = None):
+        super().__init__()
+        self.dialog_parent = dialog_parent
+        self.setWindowTitle("Gestor de Bandas")
+        self.resize(1150, 700)
+        self.setStyleSheet("background-color: white;")
+        
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(30, 30, 30, 20)
+
+        # --- HEADER (TÍTULO, SUBTÍTULO Y BOTÓN) ---
+        header_layout = QHBoxLayout()
+        title_vbox = QVBoxLayout()
+        title = QLabel("Gestor de Capturas y Bandas")
+        title.setStyleSheet("font-size: 22px; font-weight: bold; color: #111827; border: none;")
+        subtitle = QLabel("*No fue posible identificar las bandas espectrales en las siguientes capturas. Por favor, realiza la asignación manual de las bandas para cada captura.")
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet("color: #FF0000; font-size: 14px; border: none;")
+        title_vbox.addWidget(title)
+        title_vbox.addWidget(subtitle)
+        
+        self.btn_new = QPushButton("+ Nueva Captura")
+        self.btn_new.setCursor(Qt.PointingHandCursor)
+        self.btn_new.setStyleSheet("""
+            QPushButton {
+                background-color: #3B82F6; color: white; border-radius: 8px;
+                padding: 10px 20px; font-weight: bold; border: none;
+            }
+            QPushButton:hover { background-color: #2563EB; }
+        """)
+        self.btn_new.clicked.connect(self.add_empty_row)
+
+        header_layout.addLayout(title_vbox, 1)
+        #header_layout.addStretch()
+        header_layout.addWidget(self.btn_new, 0)
+        main_layout.addLayout(header_layout)
+
+        # --- TABLA ---
+        self.table_box = QFrame()
+        self.table_box.setObjectName("ContenedorPrincipal")
+        self.table_box.setStyleSheet("""
+            #ContenedorPrincipal {
+                border: 1px solid #E5E7EB;
+                border-radius: 12px;
+                background-color: white;
+            }
+        """)
+        
+        table_vbox = QVBoxLayout(self.table_box)
+        table_vbox.setContentsMargins(0, 0, 0, 0)
+        table_vbox.setSpacing(0)
+
+        # Encabezado
+        header_row = QFrame()
+        header_row.setFixedHeight(50)
+        header_row.setStyleSheet("""
+            background-color: #F9FAFB; 
+            border-bottom: 1px solid #E5E7EB; 
+            border-top-left-radius: 12px; 
+            border-top-right-radius: 12px;
+        """)
+        hr_layout = QHBoxLayout(header_row)
+        hr_layout.setContentsMargins(20, 0, 20, 0)
+        hr_layout.setSpacing(10)
+
+        # Etiquetas de columna (Sin el identificador)
+        cols = [
+            #("#", COL_WIDTHS[0]), 
+            ("<font color='#A855F7'>●</font> RGB", COL_WIDTHS[1]), 
+            ("<font color='#EF4444'>●</font> Roja", COL_WIDTHS[2]), 
+            ("<font color='#22C55E'>●</font> Verde", COL_WIDTHS[3]), 
+            ("<font color='#6B7280'>●</font> NIR", COL_WIDTHS[4]), 
+            ("<font color='#F97316'>●</font> Red Edge", COL_WIDTHS[5]), 
+            ("", COL_WIDTHS[6])
+        ]
+        
+        for text, w in cols:
+            lbl = QLabel(text)
+            lbl.setFixedWidth(w)
+            lbl.setStyleSheet("font-weight: bold; color: #4B5563; font-size: 12px; border: none;")
+            hr_layout.addWidget(lbl)
+        
+        table_vbox.addWidget(header_row)
+
+        # Scroll
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setStyleSheet("QScrollArea { border: none; background: white; border-bottom-left-radius: 12px; border-bottom-right-radius: 12px; }")
+        
+        self.scroll_content = QWidget()
+        self.rows_layout = QVBoxLayout(self.scroll_content)
+        self.rows_layout.setContentsMargins(0, 0, 0, 0)
+        self.rows_layout.setSpacing(0)
+        self.rows_layout.setAlignment(Qt.AlignTop)
+        self.scroll.setWidget(self.scroll_content)
+        
+        table_vbox.addWidget(self.scroll)
+        main_layout.addWidget(self.table_box)
+        self.rows_widgets = []
+
+        # Filas iniciales
+        #for i in range(1, 4):
+        #    self.rows_layout.addWidget(CaptureRow(i))
+
+        
+        # Botones en la parte inferior
+        button_layout = QHBoxLayout()
+        self.back_button = QPushButton("< Atrás")
+        self.back_button.clicked.connect(self.go_image_table_selection)
+        button_layout.addWidget(self.back_button)
+
+        self.finished_button = QPushButton('Finalizar')
+        self.finished_button.clicked.connect(self.finish_configure)
+        button_layout.addWidget(self.finished_button)
+
+        main_layout.addLayout(button_layout)
+
+    @Slot()
+    def add_empty_row(self):
+        # Añade la fila nueva al principio
+        self.rows_layout.insertWidget(0, CaptureRow(0, is_new=True))
+    
+    def go_image_table_selection(self):
+        self.dialog_parent.go_to_image_data_table()
+    
+    def update_tables(self, rgb_names, red_names, green_names, nir_names, re_names):
+        num_rows = len(rgb_names)
+        
+        if num_rows > 0:
+            self.btn_new.setEnabled(True)
+        else:
+            self.btn_new.setEnabled(False)
+
+        for i in range(num_rows):
+            row_wb = CaptureRow(i)
+            row_wb.update_options(rgb_names, red_names, green_names, nir_names, re_names)
+            row_wb.rgb_band_cb.setCurrentIndex(i + 1)
+            self.rows_widgets.append(row_wb)
+            self.rows_layout.addWidget(row_wb)
+
+    
+    def finish_configure(self):
+        
+        images_data = self.dialog_parent.new_analysis_data_store.images_data
+
+        for r_w in self.rows_widgets:
+            bands = r_w.get_values_row()
+            rgb_band = bands[0]
+            for _, im_d in images_data.items():
+                if rgb_band in im_d['name']:
+                    im_d["muitispec_bands"] = dict(r = bands[1],
+                                                   g = bands[2],
+                                                   nir = bands[3],
+                                                   re = bands[4])
+
+        self.dialog_parent.finished_configure.emit()
+        if isinstance(self.dialog_parent, QDialog):
+            self.dialog_parent.accept()  
+        else:
+            self.dialog_parent.close()
+
 class NewAnalysisDialog(QDialog):
+    finished_configure = Signal()
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Nuevo Análisis")
-        self.setFixedSize(800, 600)
+        self.setFixedSize(1280, 650)
 
         self.stacked_widget = QStackedWidget(self)  # Contenedor principal de pantallas
         self.setLayout(QVBoxLayout())
@@ -676,10 +947,14 @@ class NewAnalysisDialog(QDialog):
         self.image_selection_screen = ImageSelectionScreen(dialog_parent = self)
 
         self.image_data_screen = ImageDataTableScreen(dialog_parent = self)
+
+        self.manager_multispect_banb = ManagerMultiSpecBanbScreen(dialog_parent = self)
+        
         #ImageDataTableScreen
         self.stacked_widget.addWidget(self.initial_screen)
         self.stacked_widget.addWidget(self.image_selection_screen)
         self.stacked_widget.addWidget(self.image_data_screen)
+        self.stacked_widget.addWidget(self.manager_multispect_banb)
 
         self.current_step = 0  # Variable para llevar el control de los pasos
         self.stacked_widget.setCurrentIndex(self.current_step)  # Mostrar la pantalla inicial
@@ -710,3 +985,69 @@ class NewAnalysisDialog(QDialog):
         self.image_data_screen.update_data_table(self.new_analysis_data_store.images_data)
         """Método para ir al paso de tabla de datos de imagen"""
         self.stacked_widget.setCurrentIndex(2)
+    
+    def go_to_manager_multi_specs_bands(self):
+
+        images_data = self.new_analysis_data_store.images_data
+
+        ## Evaluar bandas completas
+        rgb_images = []
+        all_images_data_dict = dict()
+
+        for _, im_data in images_data.items():
+            relative_path = im_data["relative_path"]
+            base_name = os.path.basename(relative_path)[:-4]
+            if "_D" in relative_path:
+                rgb_images.append(base_name)
+
+            all_images_data_dict[base_name] = im_data
+            
+        
+        images_incomplete_bands = []
+        images_complete_bands = []
+        suffixes = ["_MS_R", "_MS_G", "_MS_NIR", "_MS_RE"]
+
+        for base_name in rgb_images:
+            band_names = [
+                base_name.replace("_D", suf) 
+                for suf in suffixes
+            ]
+
+            if not all(name in all_images_data_dict for name in band_names):
+                images_incomplete_bands.append(base_name)
+            else:
+                images_complete_bands.append(base_name)
+        
+        images_incomplete_green = []
+        images_incomplete_red = []
+        images_incomplete_nir = []
+        images_incomplete_re = []
+
+        for base_name_band in all_images_data_dict.keys():
+            if "_MS_G" in base_name_band:
+                band_name_rgb = base_name_band.replace("_MS_G","_D")
+                if band_name_rgb not in images_complete_bands:
+                    images_incomplete_green.append(all_images_data_dict[base_name_band]['name'])
+
+            elif "_MS_R" in base_name_band and "_MS_RE" not in base_name_band:
+                band_name_rgb = base_name_band.replace("_MS_R","_D")
+                if band_name_rgb not in images_complete_bands:
+                    images_incomplete_red.append(all_images_data_dict[base_name_band]['name'])
+        
+            elif "_MS_NIR" in base_name_band:
+                band_name_rgb = base_name_band.replace("_MS_NIR","_D")
+                if band_name_rgb not in images_complete_bands:
+                    images_incomplete_nir.append(all_images_data_dict[base_name_band]['name'])
+            
+            elif "_MS_RE" in base_name_band:
+                band_name_rgb = base_name_band.replace("_MS_RE","_D")
+                if band_name_rgb not in images_complete_bands:
+                    images_incomplete_re.append(all_images_data_dict[base_name_band]['name'])
+            else:
+                continue
+        
+        self.manager_multispect_banb.update_tables(images_incomplete_bands, images_incomplete_red, 
+                                                   images_incomplete_green, images_incomplete_nir, images_incomplete_re)
+        #self.image_data_screen.update_data_table(self.new_analysis_data_store.images_data)
+        """Método para ir al paso de tabla de datos de imagen"""
+        self.stacked_widget.setCurrentIndex(3)
