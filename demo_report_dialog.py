@@ -294,7 +294,7 @@ class ReportDialog(QDialog):
         ))
         row3.addSpacing(12)
         row3.addWidget(self.edad_cultivo_input(
-            "crop_age", "Edad aproximada de cultivo (años)"
+            "crop_age", "Edad aproximada del cultivo (años)"
         ))
 
         # ✅ Repartir espacio igual entre todos
