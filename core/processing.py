@@ -3432,6 +3432,7 @@ class ImageSticher():
         rgb_gsd = [im_data['gsd_horizontal'] * 100 for im_data in metadata_rgb_images]
         avg_gsd_rgb = sum(rgb_gsd) / num_images
         
+        over_sea_level_mean = round(np.mean([im_data['over_sea_level'] for im_data in metadata_rgb_images if im_data['over_sea_level']]),0)
         
         count_pixles = np.sum(np.any(final_mosaic > 0, axis=-1))
         area_mosaic = (count_pixles * dom_resolution) / 1000000
@@ -3443,6 +3444,7 @@ class ImageSticher():
 
             # Formatear al formato deseado
             fecha_formateada = dt.strftime("%d/%m/%Y")
+            hora_ampm = dt.strftime("%I %p").lstrip("0")
 
         path_card_map = f"{self.result_dir}/mosaic/rgb/card_map.png"
 
@@ -3452,6 +3454,7 @@ class ImageSticher():
             trees_count = len(unique_detects_trees),
             total_images = len(all_images_metadada_dict),
             avg_alt = avg_alt,
+            masl = over_sea_level_mean,
             avg_gsd_rgb = avg_gsd_rgb,
             avg_gsd_multispec = avg_gsd_multispec,
             area_mosaic = area_mosaic,
@@ -3459,6 +3462,7 @@ class ImageSticher():
             zinc_map_trees = path_zinc_trees,
             card_map = path_card_map,
             adquisition_date = fecha_formateada,
+            hora_ampm = hora_ampm,
             healthy_count_ndvi = healthy_count_ndvi,
             warning_count_ndvi = warning_count_ndvi,
             possible_problem_count_ndvi = possible_problem_count_ndvi,

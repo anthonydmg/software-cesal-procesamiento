@@ -389,9 +389,11 @@ class PdfGeneratorWorker(QThread):
                 if self.data['incl_area']:
                     general_info.append(("Área Apox. Terreno:", f'{round(sumary_processing["area_mosaic"],2)} ha'))
 
+                general_info.append(("Metros sobre el nivel del mar:", f'{sumary_processing.get("masl","-")} m'))
+
                 if self.data["incl_fecha"]:
-                    general_info.append(("Fecha de Adquisición:", sumary_processing["adquisition_date"]))
-                sumary_processing
+                    general_info.append(("Fecha de Adquisición:", sumary_processing.get("adquisition_date", "-")))
+                    general_info.append(("Hora de Adquisición:",  sumary_processing.get("hora_ampm", "-") + " aprox."))
 
                 if self.data['incl_detalles']:
                     general_info.append(("Cantidad de Imágenes:", sumary_processing["total_images"]))

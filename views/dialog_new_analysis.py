@@ -131,6 +131,7 @@ class MetadataWorker(QObject):
 
     def get_exif_data(self, image_path):
         metadata = get_metadata(image_path)
+        print("metadata:", metadata)
         latitude, longitude = get_gps_coordinates(metadata)
         print(f"Latitud: {latitude}, Longitud: {longitude}")
         image_width, image_height = get_image_resolution(metadata)
@@ -163,6 +164,7 @@ class MetadataWorker(QObject):
 def read_metadata_worker(path):
     try:
         metadata = get_metadata(path)
+        print("metadata:", metadata)
         latitude, longitude = get_gps_coordinates(metadata)
         image_width, image_height = get_image_resolution(metadata)
         yaw_degree, pitch_degree, roll_degree = get_gimbal_euler_angles(metadata)
@@ -170,6 +172,12 @@ def read_metadata_worker(path):
         GSD_horizontal, GSD_vertical = calcule_gsd_teorico(metadata)
         datetime = metadata.get("EXIF:DateTimeOriginal")
         basename = os.path.basename(path)
+        
+        # altituded sobre el nivel del mar
+        over_sea_level = metadata.get("EXIF:GPSAltitude", None)
+        # model de drone
+        drone_model = metadata.get("XMP:DroneModel", 'M3M')
+        
 
         # Parse Dewarp Data e.g. "YYYY-mm-dd; fx,fy,cx,cy,k1,k2,p1,p2,k3"
 
@@ -235,6 +243,8 @@ def read_metadata_worker(path):
         gsd_horizontal = GSD_horizontal,
         gsd_vertical = GSD_vertical,
         relative_altitude = relative_altitude,
+        over_sea_level = over_sea_level,
+        drone_model = drone_model,
         bits=bits, black=black, gain=gain, exp_us=exp_us, pCam=pCam,
         irradiance=irradiance, band=band,
         kpoly=kpoly, cx_design=cx_design, cy_design=cy_design,
