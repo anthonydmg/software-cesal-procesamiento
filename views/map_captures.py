@@ -537,13 +537,25 @@ class MapCaptures(QWidget):
         else:
             lat = -13.6723252222222
             lon = -72.9468904444444
+
+        
         self.m = folium.Map(
             location=[lat, lon], 
             zoom_start=19,
-            max_zoom=22, 
-            tiles=f"https://api.mapbox.com/styles/v1/mapbox/satellite-v9/tiles/{{z}}/{{x}}/{{y}}?access_token=pk.eyJ1IjoiYW50aG9ueW1nMSIsImEiOiJjbTNuajBzamwxZXMxMmtweDV3anZkcHRxIn0.1ZlgQwJcn4msckpzTNSSJg",
-            attr="Mapbox"
+            max_zoom=22,
+            tiles= None #"https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+            #attr="Tiles © Esri"
         )
+        
+
+        folium.TileLayer(
+            tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+            attr="Tiles © Esri",
+            max_zoom=22,
+            max_native_zoom=17  # 🔥 clave
+        ).add_to(self.m)
+        
+        
         self.update_data(images_data)
 
     def show_cancel(self):
