@@ -632,7 +632,9 @@ class MapCaptures(QWidget):
         if images_data == None or len(images_data) == 0:
             return
         
-        for id, metadata in images_data.items():
+        rgb_images_data = [d for d in images_data.values() if ".jpg" in d["name"].lower() ]
+
+        for id, metadata in rgb_images_data.items():
             lat, lon, name = metadata["latitude"], metadata["longitude"], metadata["name"]
             folium.CircleMarker(
                 location=[lat, lon],  
@@ -641,7 +643,7 @@ class MapCaptures(QWidget):
                 fill=True, 
                 fill_color='red', 
                 fill_opacity=1,
-                tooltip=name
+                tooltip=name[:-4]
             ).add_to(self.m)
 
         #for lat, lon, name in zip(df["latitude"], df["longitude"], df["basename"]):
