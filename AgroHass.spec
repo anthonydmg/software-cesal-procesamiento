@@ -1,25 +1,27 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_all
-datas_yolo, binaries_yolo, hiddenimports_yolo = collect_all('ultralytics')
 block_cipher = None
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=datas_yolo + [
+    datas= [
         # --- AQUÍ AGREGAS TUS CARPETAS ---
         # (Ruta origen en tu proyecto, Ruta destino en la carpeta final)
         
         ('assets', 'assets'),  # Copia toda la carpeta assets
-        ('.env', '.'),
         # OJO: Si dentro de 'views' o 'core' tienes archivos NO python 
         # (como archivos .ui, .json o el modelo .pt), agrégalos también:
         # ('core/modelos', 'core/modelos'), 
     ],
-    hiddenimports=hiddenimports_yolo + [
-        # Si usas importaciones dinámicas en core/ o views/, ponlas aquí
-    ],
+    hiddenimports= [
+        'sklearn.utils._cython_blas',
+        'sklearn.utils._typedefs',
+        'sklearn.neighbors._partition_nodes',
+        'sklearn.neighbors._quad_tree',
+        'sklearn.tree._utils',
+        'sklearn.ensemble._hist_gradient_boosting.gradient_boosting', # El que falta
+    ], # Si usas importaciones dinámicas en core/ o views/, ponlas aquí
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -42,13 +44,13 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=True,
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='assets/icon_software.ico',
+    icon='assets/icon_app.ico',
 )
 coll = COLLECT(
     exe,

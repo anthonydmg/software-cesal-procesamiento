@@ -1,8 +1,9 @@
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QSizePolicy, QPushButton, QSpacerItem, QFrame, QFileDialog
+from PySide6.QtWidgets import QWidget, QScrollArea, QVBoxLayout, QLabel, QHBoxLayout, QSizePolicy, QPushButton, QSpacerItem, QFrame, QFileDialog
 from PySide6.QtCore import Qt, QRectF, QSize
 from PySide6.QtGui import QIcon, QColor, QPixmap, QFontMetrics, QPainterPath, QPainter, QFont
 from PySide6.QtWidgets import QGraphicsDropShadowEffect
 from PySide6.QtCore import QStandardPaths
+from core.constants import DEFAULT_PROCESS_CONFIG
 from core.utils import resource_path
 from views.dialog_new_analysis import NewAnalysisDialog
 import json
@@ -10,6 +11,7 @@ from views.dialog_new_analysis import AnalysisData
 import os
 import shutil
 from datetime import datetime
+import uuid
 
 
 class TarjetaLogo(QLabel):
@@ -22,7 +24,7 @@ class TarjetaLogo(QLabel):
             border-radius: 8px;
             padding: 5px;
         """)
-        self.setFixedSize(80, 80) # Tamaño fijo para uniformidad
+        self.setFixedSize(90, 80) # Tamaño fijo para uniformidad
         self.setAlignment(Qt.AlignCenter)
         
         # Cargar y escalar imagen
@@ -74,10 +76,21 @@ class VentanaFooter(QWidget):
         
         # SECCIÓN IZQUIERDA
         izq = SeccionInformativa(
-            "DESARROLLADO EN COLABORACIÓN CON:",
-            [resource_path(os.path.join("assets", "INICTEL-LOGO.jpg")), resource_path(os.path.join("assets", "cesal-logo.png"))] # Cambia por tus rutas
+            "DESARROLLADO POR:",
+            [resource_path(os.path.join("assets", "inictel-uni-logo.png")), 
+             #resource_path(os.path.join("assets", "cesal-logo.png")),
+             #resource_path(os.path.join("assets", "CITE_logo.jpg"))
+             ] # Cambia por tus rutas
         )
-            
+
+        med = SeccionInformativa(
+            "EN CONVENIO CON:",
+            [resource_path(os.path.join("assets", "cesal-logo.png")), 
+             #resource_path(os.path.join("assets", "cesal-logo.png")),
+             #resource_path(os.path.join("assets", "CITE_logo.jpg"))
+             ] # Cambia por tus rutas
+        )
+
         # SEPARADOR VERTICAL (La mejor forma)
         linea = QFrame()
         linea.setFrameShape(QFrame.VLine)
@@ -92,8 +105,10 @@ class VentanaFooter(QWidget):
         )
         
         # Agregar al layout con proporciones
-        main_layout.addWidget(izq, stretch=2)
-        main_layout.addWidget(linea)
+        main_layout.addWidget(izq, stretch=1)
+        #main_layout.addWidget(linea)
+        main_layout.addWidget(med)
+        #main_layout.addWidget(linea)
         main_layout.addWidget(der, stretch=1)
 
 def rounded_top_pixmap(image_path, radius, size):
@@ -264,17 +279,57 @@ class AnalysisCard(QWidget):
         self.on_click(self.base_dir)
         super().mousePressEvent(event)
 
+    # def confirm_delete(self):
+    #     from PySide6.QtWidgets import QMessageBox
+    #     reply = QMessageBox.question(
+    #         None,
+    #         "Confirmar eliminación",
+    #         "¿Estás seguro de eliminar este análisis?",
+    #         QMessageBox.Yes | QMessageBox.No
+    #     )
+    #     if reply == QMessageBox.Yes and self.on_delete:
+    #         self.on_delete(self.base_dir)  # ejecutar callback para borrar
+    #         print("Elminar Analisis")
+
+    
     def confirm_delete(self):
         from PySide6.QtWidgets import QMessageBox
-        reply = QMessageBox.question(
-            self,
-            "Confirmar eliminación",
-            "¿Estás seguro de eliminar este análisis?",
-            QMessageBox.Yes | QMessageBox.No
-        )
-        if reply == QMessageBox.Yes and self.on_delete:
-            self.on_delete(self.base_dir)  # ejecutar callback para borrar
-            print("Elminar Analisis")
+        
+        # 1. Instanciamos el objeto en lugar de usar el método estático
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Confirmar eliminación")
+        msg_box.setText("¿Estás seguro de eliminar este análisis?")
+        msg_box.setIcon(QMessageBox.Icon.Warning) # Agrega un icono de advertencia nativo
+        msg_box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        
+        # 2. Forzamos un estilo limpio para evitar la herencia oscura
+        msg_box.setStyleSheet("""
+            QMessageBox {
+                background-color: #ffffff; /* Fondo blanco forzado */
+            }
+            QLabel {
+                color: #1f2937; /* Texto gris muy oscuro/casi negro */
+                font-size: 13px;
+            }
+            QPushButton {
+                background-color: #f3f4f6;
+                color: #1f2937;
+                padding: 6px 16px;
+                border-radius: 4px;
+                border: 1px solid #d1d5db;
+                min-width: 60px;
+            }
+            QPushButton:hover {
+                background-color: #e5e7eb;
+            }
+        """)
+        
+        # 3. Ejecutamos el diálogo y capturamos la respuesta
+        reply = msg_box.exec()
+        
+        if reply == QMessageBox.StandardButton.Yes and self.on_delete:
+            self.on_delete(self.base_dir)
+            print("Eliminar Analisis")
         
 
 class AnalysisButton(QPushButton):
@@ -339,9 +394,11 @@ class AnalysisButton(QPushButton):
     }
 """)
         # Ajustar el tamaño del botón para que se acomode al contenido
-        self.setMinimumHeight(120)  # Altura mínima adecuada
-        self.setMinimumWidth(300)  # Ancho mínimo ajustado
-        self.adjustSize()
+        self.setFixedHeight(150)
+        self.setFixedWidth(360)
+        #self.setMinimumHeight(120)  # Altura mínima adecuada
+        #self.setMinimumWidth(300)  # Ancho mínimo ajustado
+        #self.adjustSize()
        
     def enterEvent(self, event):
         self.shadow_effect.setBlurRadius(15)       # Tamaño difuminado
@@ -434,7 +491,20 @@ class AppDataManager():
     
     def get_config_path(self):
         config_dir = QStandardPaths.writableLocation(QStandardPaths.AppConfigLocation)
+         # 2. Verificar si existe, y si no, crearla (incluyendo carpetas padres si faltan)
+        if not os.path.exists(config_dir):
+            os.makedirs(config_dir, exist_ok=True)
+
         return os.path.join(config_dir, "recent_projects.json")
+    
+    def get_process_config_path(self):
+        config_dir = QStandardPaths.writableLocation(QStandardPaths.AppConfigLocation)
+        print("config_dir:", config_dir)
+        # 2. Verificar si existe, y si no, crearla (incluyendo carpetas padres si faltan)
+        if not os.path.exists(config_dir):
+            os.makedirs(config_dir, exist_ok=True)
+            
+        return os.path.join(config_dir, "process_config.json")
     
     def load_recent_projects(self):
         config_path = self.get_config_path()
@@ -443,6 +513,32 @@ class AppDataManager():
                 return json.load(f)
         return []
     
+    def load_process_config(self):
+        config_path = self.get_process_config_path()
+        if os.path.exists(config_path):
+            with open(config_path,  "r") as f:
+                return json.load(f)
+        return None
+    
+    def update_process_config(self, new_process_config):
+        process_config = self.load_process_config()
+        if process_config:
+            process_config.update(new_process_config)
+            self.save_process_config(new_process_config)
+        else:
+            self.save_process_config(new_process_config)
+
+    def save_process_config(self, process_config):
+        config_path = self.get_process_config_path()
+        with open(config_path, "w") as f:
+            json.dump(process_config, f, indent = 4)
+
+    def init_process_config(self):
+        config_path = self.get_process_config_path()
+        if not os.path.exists(config_path):
+            with open(config_path, "w") as f:
+                json.dump(DEFAULT_PROCESS_CONFIG, f, indent = 4)
+            
     def save_recent_projects(self, projects):
         config_path = self.get_config_path()
         with open(config_path, "w") as f:
@@ -451,6 +547,19 @@ class AppDataManager():
     def add_new_project(self, project_info):
         projects = self.load_recent_projects()
         self.save_recent_projects([project_info] + projects)
+
+
+    def update_project_info(self, identifier_id, num_images):
+        projects = self.load_recent_projects()
+
+        for p in projects:
+            if "identifier_id" not in p:
+                continue
+
+            if p["identifier_id"] == identifier_id:
+                p["num_images"] == num_images or p["num_images"]
+                break
+        
 
 class Home(QWidget):
     def __init__(self, main_window=None):
@@ -469,9 +578,9 @@ class Home(QWidget):
         buttons_layout.setContentsMargins(0,10,0,10)
         buttons_layout.setSpacing(60)
         buttons_layout.addStretch()
-        button_new = AnalysisButton(resource_path(os.path.join("assets", "new.svg")), "Nuevo Análisis", "Genera un nuevo analisis a partir de imagenes aereas para identificar deficiencias nutricionales.")
+        button_new = AnalysisButton(resource_path(os.path.join("assets", "new.svg")), "Nuevo Análisis de Parcela", "Configura un nuevo procesamiento y análisis de imágenes aéreas multiespectrales de una parcela de palta Hass para identificar posibles problemas nutricionales.")
         button_new.clicked.connect(self.open_new_analysis_dialog)
-        button_open = AnalysisButton(resource_path(os.path.join("assets", "open.svg")), "Abrir Análisis", "Abre un análisis guardado y revisa la informacion obtenida.")
+        button_open = AnalysisButton(resource_path(os.path.join("assets", "open.svg")), "Abrir Análisis de Parcela", "Abre el análisis guardado de una parcela y revisa los resultados obtenidos del procesamiento de las imágenes.")
         button_open.clicked.connect(self.open_analysis) 
 
         buttons_layout.addWidget(button_new)
@@ -487,39 +596,105 @@ class Home(QWidget):
         recientes_layout.addWidget(analysis_recientes)
         # Cards Analisis
         
-        self.cards_layout = QHBoxLayout()
-        self.cards_layout.setContentsMargins(0,0,0,0)
+        # 1. Creamos el Scroll Area
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff) # Solo horizontal
+        self.scroll_area.setFrameShape(QFrame.NoFrame) # Quitar borde del scroll area
+        self.scroll_area.setStyleSheet("background: transparent;")
+        self.scroll_area.setStyleSheet("""
+            QScrollArea {
+                background: transparent;
+                border: none;
+            }
+            /* Estilo del "carril" de la barra */
+            QScrollBar:horizontal {
+                border: none;
+                background: #f0f0f0; /* Gris muy claro */
+                height: 8px; /* Barra más delgada */
+                margin: 0px 10px 0px 10px;
+                border-radius: 4px;
+            }
+            /* Estilo del "pulgar" (la parte que se arrastra) */
+            QScrollBar::handle:horizontal {
+                background: #c0c0c0;
+                min-width: 30px;
+                border-radius: 4px;
+            }
+            /* Cambio de color al pasar el ratón */
+            QScrollBar::handle:horizontal:hover {
+                background: #a0a0a0;
+            }
+            /* Ocultar las flechas de los extremos */
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                border: none;
+                background: none;
+                width: 0px; 
+            }
+        """)
+
+        # 2. Widget contenedor para el layout de las tarjetas
+        self.scroll_content = QWidget()
+        self.scroll_content.setStyleSheet("background: transparent;")
+        self.cards_layout = QHBoxLayout(self.scroll_content) # El layout ahora pertenece al contenedor
+        self.cards_layout.setContentsMargins(10, 10, 10, 20) # Margen: izq, arriba, der, abajo
+        self.cards_layout.setSpacing(20) # Espacio entre cards
+        self.cards_layout.setAlignment(Qt.AlignLeft)
+
+        # 3. Asignamos el contenedor al scroll area
+        self.scroll_area.setWidget(self.scroll_content)
+        
+        recientes_layout.addWidget(self.scroll_area)
+
+        #self.cards_layout = QHBoxLayout()
+        #self.cards_layout.setContentsMargins(0,0,0,0)
 
   
         self.recient_projects = []
 
-        self.refresh_cards()
-        self.cards_layout.setAlignment(Qt.AlignLeft) 
+        #self.refresh_cards()
+        #self.cards_layout.setAlignment(Qt.AlignLeft) 
 
-        recientes_layout.addLayout(self.cards_layout)
+        #recientes_layout.addLayout(self.cards_layout)
         
         # --Linea Divisora
-        line = QFrame()
-        line.setFrameShape(QFrame.HLine)
+        #line = QFrame()
+        #line.setFrameShape(QFrame.HLine)
         #line.setFrameShadow(QFrame.Sunken)
         #line.setStyleSheet("background-color: #e0e0e0;") # Gris claro
-        line.setStyleSheet("background-color: #d1d1d1; max-height: 1px; border: none;")
-        line.setFixedHeight(1) # Grosor de 1 píxel
+        #line.setStyleSheet("background-color: #d1d1d1; max-height: 1px; border: none;")
+        #line.setFixedHeight(1) # Grosor de 1 píxel
         
+        #footer = VentanaFooter()
+        #layout.addWidget(title)
+        #layout.addLayout(buttons_layout)
+        #layout.addWidget(analysis_recientes)
+        #layout.addLayout(recientes_layout)
+        #layout.addStretch()
+        #layout.addWidget(line)
+        #layout.addWidget(footer)
+        
+        # --- Footer y Layout Principal ---
         footer = VentanaFooter()
         layout.addWidget(title)
         layout.addLayout(buttons_layout)
-        #layout.addWidget(analysis_recientes)
         layout.addLayout(recientes_layout)
         layout.addStretch()
-        #layout.addWidget(line)
         layout.addWidget(footer)
         
+        self.appdata_manager.init_process_config()
         self.setLayout(layout)
+        
+        self.refresh_cards()
+
+        #self.appdata_manager.init_process_config()
+
+        #self.setLayout(layout)
 
 
     def refresh_cards(self):
-        self.recient_projects = self.appdata_manager.load_recent_projects()[:5]
+        self.recient_projects = self.appdata_manager.load_recent_projects()#[:5]
         #self.recient_projects = self.recient_projects[1:]
 
         #self.appdata_manager.save_recent_projects(self.recient_projects)
@@ -580,26 +755,57 @@ class Home(QWidget):
         dialog = NewAnalysisDialog(self)
         
         def handle_finished_configure():
-            self.main_window.update_analysis_data(dialog.new_analysis_data_store)
+            
             base_dir = dialog.new_analysis_data_store.base_dir
             images_data = dialog.new_analysis_data_store.images_data
             name = dialog.new_analysis_data_store.name
             
+            print("Actualizando details....")
+            id_unico = str(uuid.uuid4())
+            gsd_avg = dialog.new_analysis_data_store.gsd_avg
+            alt_avg = dialog.new_analysis_data_store.alt_avg
+
             project_info = {
                     "name": name,
+                    "identifier_id": id_unico,
                     "creation_date": datetime.now().isoformat(),
                     "num_images": len(images_data),
-                    "base_dir": base_dir
+                    "base_dir": base_dir,
+                    "gsd_avg": gsd_avg,
+                    "alt_avg": alt_avg
                 }
+            
+            fecha_formateada = ""
+            hora_ampm = ""
+            if len(images_data) > 0:
+                exif_str = images_data[0]['datetime_original']
+                dt = datetime.strptime(exif_str, "%Y:%m:%d %H:%M:%S")
+
+                # Formatear al formato deseado
+                fecha_formateada = dt.strftime("%d/%m/%Y")
+                hora_ampm = dt.strftime("%I %p").lstrip("0")
+
+            dialog.new_analysis_data_store.set_adquisition_date(fecha_formateada)
+            
+            self.main_window.update_analysis_data(dialog.new_analysis_data_store)
+            
+            project_info["adquisition_date"] = fecha_formateada
+            project_info["hora_ampm"] = hora_ampm
+
+            field_information = dialog.new_analysis_data_store.field_info
             
             config = {
                     "project_info": project_info,
-                    "image_metatada": images_data
+                    "image_metatada": images_data,
+                    "field_information": field_information
                 }
             
-            self.save_configure_analysis(base_dir, config)
+            self.save_configure_analysis(base_dir, config)     
 
             self.appdata_manager.add_new_project(project_info)
+            self.refresh_cards()
+
+           
         
         dialog.finished_configure.connect(handle_finished_configure)
 
@@ -610,6 +816,16 @@ class Home(QWidget):
         with open(f"{base_dir}/config.json", "w") as f:
             json.dump(data, f, indent=4) 
 
+    def load_local_process_config(self, path_dir):
+        path = f"{path_dir}/processing_config.json"
+        print("load_local_process_config path:", path)
+        if not os.path.exists(path):
+            return None
+        
+        with open(path, "r") as f:
+            config = json.load(f)
+            return config
+        
     def load_analysis(self, path_dir):
         with open(f"{path_dir}/config.json", "r") as f:
             config = json.load(f)
@@ -620,9 +836,40 @@ class Home(QWidget):
         images_data = config['image_metatada']
         print("Cargando datos.....")
         images_data = {i: images_data[str(i)] for i in range(len(images_data))}
+        field_information = config["field_information"]
+        identifier_id = None if "identifier_id" not in project_info else project_info["identifier_id"]
+        analysis_data = AnalysisData(base_dir = project_info['base_dir'],
+                                     identifier_id = identifier_id,
+                                    name = project_info['name'], 
+                                    images_data=images_data,
+                                    alt_avg = project_info['alt_avg'],
+                                    gsd_avg = project_info['gsd_avg'],
+                                    adquisition_date = project_info['adquisition_date']
+                                    )
+        
         
 
-        analysis_data = AnalysisData(base_dir = project_info['base_dir'], name = project_info['name'], images_data=images_data)
+        
+        analysis_data.update_field_info(stage=field_information["stage"],
+                                        soil_type=field_information["soil_type"],
+                                        irrigation_type = field_information["irrigation_type"])
+        
+        
+        local_process_config = self.load_local_process_config(path_dir)
+        print("local_process_config:", local_process_config)
+        
+        if local_process_config is None:
+            local_process_config = self.appdata_manager.load_process_config()
+        
+        print("local_process_config:", local_process_config)
+ 
+        if local_process_config:
+            target_resolution_option = local_process_config["target_resolution_option"]
+            tresh_stages = local_process_config["tresh_stages"]
+            analysis_data.set_target_resolution(target_resolution_option)
+            analysis_data.set_thresh_stages(tresh_stages)
+
+
         print("Actualizando Vistas.....")
         
         self.main_window.update_analysis_data(analysis_data)
@@ -635,8 +882,11 @@ class Home(QWidget):
         
         if os.path.exists(mosaic_path):
             self.main_window.page_map_trees.layers_ready.emit(result_dir)
+            self.main_window.enable_nav_item(2)
             self.main_window.switch_page(2, True)
+            
         else:
+            self.main_window.enable_nav_item(1)
             self.main_window.switch_page(1, True)
 
     def open_analysis(self):

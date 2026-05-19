@@ -1,0 +1,39 @@
+name: soft-prod
+channels:
+  - conda-forge
+  - defaults
+  - nvidia
+dependencies:
+  - python=3.11
+  - pip
+  - numpy
+  - pandas
+  - scipy
+  - scikit-learn
+  - gdal
+  - proj
+  - pip:
+      - onnxruntime-gpu==1.22.0
+      - opencv-python==4.13.0.92
+      - pyside6==6.10.2
+      - matplotlib==3.10.8
+      - scikit-image==0.26.0
+      - folium==0.20.0
+      - polars==1.38.1
+      - pillow==12.1.1
+      - tqdm==4.67.3
+      - pyyaml==6.0.3
+      - python-dotenv==1.2.1
+      - requests==2.32.5
+      - networkx==3.6.1
+      - sympy==1.14.0
+      - onnxslim==0.1.90
+      - pyexiftool==0.5.6
+      - reportlab==4.4.9
+      - svglib==1.6.0
+      - coloredlogs==15.0.1
+      - imageio==2.37.3
+      - tifffile
+      - fsspec
+      - jinja2
+      - pyproj

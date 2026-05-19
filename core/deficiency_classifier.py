@@ -1,11 +1,11 @@
-import torch
-import torch.nn as nn
-import random
-from torchvision.models import resnet18
 import os
 import numpy as np
 import cv2
+import joblib
+from skimage.feature import graycomatrix, graycoprops
+import pandas as pd
 
+from core.constants import THRESH_STAGES_DEFAULT, UNCERTANTY_VALUE
 from core.utils import resource_path
 
 def load_gray16(path):
@@ -138,227 +138,76 @@ def compute_reflectance(Icorr, meta):
     #ref = (cam * meta["pCam"]) / max(meta["irradiance"], 1e-12)
     return ref
 
-def build_resnet18_6ch(num_classes=2):
-    model = resnet18(weights=None)
 
-    # Modify first conv layer: 6 input channels → 64 output channels
-    model.conv1 = nn.Conv2d(
-        9, 64,
-        kernel_size=7,
-        stride=2,
-        padding=3,
-        bias=False
-    )
+#THRESH_STAGES_DEFAULT = {"Pre-floracion": 2.8,"Floracion": 2.6, "Cuajado": 2.0, "Fruto": 1.8, "Cosecha": 2.4}
 
-    # Final classifier
-    model.fc = nn.Linear(512, num_classes)
-
-    return model
-
-
-class NitrogenDefClassifer:
-    _model = None
-    #_model_path = None
-    _device = "cpu"
-
-    # -------------------------------------------------------------
-    # CONFIGURACIÓN INICIAL
-    # -------------------------------------------------------------
-    @classmethod
-    def configure(cls, model_path, device="cpu"):
-        cls._model_path = model_path
-        cls._device = device
-
-    # -------------------------------------------------------------
-    # ESTABLECER DEVICE ANTES O DESPUÉS DEL LOAD
-    # -------------------------------------------------------------
-    @classmethod
-    def set_device(cls, device):
-        cls._device = device
-        if cls._model is not None:
-            cls._model.to(device)
-
-    # -------------------------------------------------------------
-    # LAZY-LOAD DEL MODELO
-    # -------------------------------------------------------------
-    @classmethod
-    def get(cls):
-        """Retorna el modelo. Lo carga solo si aún no está cargado."""
-        if cls._model is None:
-
-            #if cls._model_path is None:
-            #    raise RuntimeError("Primero debes llamar ModelManager.configure().")
-
-            # Construir arquitectura
-            model = build_resnet18_6ch()
-            
-            # Cargar pesos al CPU
-            state = torch.load(resource_path(os.path.join("assets", "models", "best_resnet18_6ch.pth")), map_location="cpu")
-            model.load_state_dict(state)
-
-            # Mover a device deseado
-            model.to(cls._device)
-            model.eval()
-
-            cls._model = model
-
-        return cls._model
-
-    # -------------------------------------------------------------
-    # LIMPIAR EL MODELO DE LA MEMORIA
-    # -------------------------------------------------------------
-    @classmethod
-    def unload(cls):
-        if cls._model is not None:
-            del cls._model
-            cls._model = None
-
-            torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
-
-    @classmethod
-    @torch.no_grad()
-    def predict(cls, cube, tile_size=256, num_tiles=16):
-        """Realiza predicción usando lazy-loading del modelo."""
-        model = cls.get()  # asegura que el modelo esté cargado
-        #input_tensor = input_tensor.to(cls._device)
-        arr = cube.transpose(1,2,0)
-
-        predictions = []
-        tiles = []
-        print("arr:", arr.shape)
-        # If your data is small, consider reducing num_tiles
-        for _ in range(num_tiles):
-            h, w, _ = arr.shape
-            if h <= tile_size or w <= tile_size:
-                top = 0
-                left = 0
-            else:
-                top = random.randint(0, h - tile_size)
-                left = random.randint(0, w - tile_size)
-
-            tile = arr[top:top+tile_size, left:left+tile_size, :]
-            tiles.append(tile)
-        batch = np.stack(tiles, axis=0)
-        print("batch:", batch.shape)
-        batch_t = torch.from_numpy(batch).permute(0,3,1,2).float().to(cls._device)
-
-        print("batch_t:", batch_t.shape)
-        with torch.no_grad():
-            out = model(batch_t)
-            preds = torch.argmax(out, dim=1).cpu().numpy()
-
-        final = np.bincount(preds).argmax()
-        return final
-
-    @classmethod
-    def build_cube_and_predict(cls, rgb_path, mask_tree, corner, all_metadata_images):
-
-        base = os.path.basename(rgb_path)
-
-        if "muitispec_bands" in all_metadata_images[base]:
-            muitispec_bands = all_metadata_images[base]['muitispec_bands']
-            base_dir  = os.path.dirname(rgb_path)
-            nir_path   = os.path.join(base_dir, muitispec_bands['nir'])
-            green_path = os.path.join(base_dir, muitispec_bands['g'])
-            redge_path = os.path.join(base_dir, muitispec_bands['r'])
-            red_path   = os.path.join(base_dir, muitispec_bands['re'])
+def get_class_def_nitrogen(thresh_stages, nitrogen_value, stage, uncertanty):
+    if thresh_stages[stage] + uncertanty <= nitrogen_value:
+        return "saludable"
+    elif thresh_stages[stage] - uncertanty < nitrogen_value:
+        return "posible-deficiencia"
+    else:
+        return "deficiencia"
+                
+class NitrogenDefClassiferML:
+    def __init__(self, thresh_stages = THRESH_STAGES_DEFAULT, uncertanty = UNCERTANTY_VALUE):
+        self.uncertanty = uncertanty
         
+        model_path = resource_path(os.path.join("assets", "models", "hgb_model.pkl"))
+        self.model = joblib.load(model_path)
+        
+        features_path = resource_path(os.path.join("assets", "models", "hgb_features.pkl"))
+        self.feature_columns = joblib.load(features_path)
+        self.thresh_stages = thresh_stages
+    
+    def _extract_features_from_cube(sef, cube):
+        features = {}
+        names = ["green","red","rededge","nir","ndvi","gndvi","ndre","ccci","savi"]
+
+        selected = ["green","red","rededge","nir","ndvi","ndre","ccci"]
+
+        for n in selected:
+            b = cube[names.index(n)]
+            features[f"{n}_mean"] = np.mean(b)
+            features[f"{n}_std"] = np.std(b)
+
+        ndre = cube[names.index("ndre")]
+        ccci = cube[names.index("ccci")]
+
+        features["ndre_p90"] = np.percentile(ndre, 90)
+        features["ccci_p90"] = np.percentile(ccci, 90)
+
+        ndvi = cube[names.index("ndvi")]
+        ndvi_scaled = ((ndvi - ndvi.min()) / (np.ptp(ndvi)+1e-6) * 255).astype(np.uint8)
+
+        glcm = graycomatrix(ndvi_scaled, [1], [0], 256, True, True)
+
+        features["ndvi_contrast"] = graycoprops(glcm, "contrast")[0,0]
+        features["ndvi_homogeneity"] = graycoprops(glcm, "homogeneity")[0,0]
+
+        features["ndre_high_fraction"] = np.mean(ndre > 0.3)
+        features["ccci_high_fraction"] = np.mean(ccci > 0.5)
+
+        return features
+
+    def _get_class_def_nitrogen(self, nitrogen_value, stage):
+        if self.thresh_stages[stage] + self.uncertanty <= nitrogen_value:
+            return "saludable"
+        elif self.thresh_stages[stage] - self.uncertanty < nitrogen_value:
+            return "posible-deficiencia"
         else:
-            nir_path   = rgb_path.replace("_D.JPG", "_MS_NIR.TIF")
-            green_path = rgb_path.replace("_D.JPG", "_MS_G.TIF")
-            redge_path = rgb_path.replace("_D.JPG", "_MS_RE.TIF")
-            red_path   = rgb_path.replace("_D.JPG", "_MS_R.TIF")
+            return "deficiencia"
+    
+    def predict(self, cube, stage):
+        feats = self._extract_features_from_cube(cube[:,:, :-1])
+        df = pd.DataFrame([feats])
 
-        nir_basename = os.path.basename(nir_path)
-        green_basename = os.path.basename(green_path)
-        redge_basename = os.path.basename(redge_path)
-        red_basename = os.path.basename(red_path)
+        df = df.reindex(columns=self.feature_columns, fill_value=0)
 
+        pred = self.model.predict(df.values)[0]
 
-        if not all(os.path.exists(p) for p in [nir_path, green_path, redge_path]):
-            print(f"Saltando {base}: faltan bandas.")
-            return
-        
-       
-        #rgb_file_metadata = all_metadata_images.get(base, None)
-        nir_file_metadata = all_metadata_images.get(nir_basename, None)
-        green_file_metadata = all_metadata_images.get(green_basename, None)
-        redge_file_metadata = all_metadata_images.get(redge_basename, None)
-        red_file_metadata = all_metadata_images.get(red_basename, None)
-        
-
-         # ---- Calibración de cada banda ----
-        nir_corr, mn   = per_band_pipeline(nir_path, nir_file_metadata)
-        red_corr, mr   = per_band_pipeline(red_path, red_file_metadata)
-        green_corr, mg = per_band_pipeline(green_path, green_file_metadata)
-        redge_corr, mre = per_band_pipeline(redge_path, redge_file_metadata)
-
-        # ---- Reflectancias ----
-        nir_ref   = compute_reflectance(nir_corr, mn).astype(np.float32)
-        red_ref   = compute_reflectance(red_corr, mr).astype(np.float32)
-        green_ref = compute_reflectance(green_corr, mg).astype(np.float32)
-        redge_ref = compute_reflectance(redge_corr, mre).astype(np.float32)
-
-         # ---- Índices ----
-        eps = 1e-12
-
-        ndvi  = (nir_ref - red_ref) / (nir_ref + red_ref + eps)
-        gndvi = (nir_ref - green_ref) / (nir_ref + green_ref + eps)
-        ndre  = (nir_ref - redge_ref) / (nir_ref + redge_ref + eps)
-        ccci  = (ndvi - gndvi) / (ndvi + gndvi + eps)
-        
-
-        sr = nir_ref / (red_ref + eps)
-        msr = (sr - 1.0) / (np.sqrt(sr) + 1.0 + eps)
-
-        L = 0.5
-        savi = ((1 + L) * (nir_ref - red_ref)) / (nir_ref + red_ref + L + eps)
-
-        mcari = ((redge_ref - red_ref) - 0.2 * (red_ref - green_ref)) * (redge_ref / (red_ref + eps))
-
-        print("mcari max:", mcari.max())
-        print("mcari min:", mcari.min())
-        print("mcari mean:", mcari.mean())
-        
-        rgb = cv2.imread(rgb_path, cv2.IMREAD_UNCHANGED)
-        h_out, w_out =  rgb.shape[:2]
-        H_dewarp = red_file_metadata["H_dewarp"]
-        H_dewarp = np.array(H_dewarp)
-        x, y = corner
-        h, w = mask_tree.shape[:2]
-        # ---- Warp al plano RGB ----
-        
-        #H_dewarp, h_out, w_out = ndvi_to_drgb(rgb_path, red_path)
-        print("ndvi mean", ndvi.mean())
-        indices = [ndvi, gndvi, ndre, ccci, savi, mcari] 
-        aligned_idx = []
-
-        for idx in indices:
-            idx = idx.clip(-1.0, 1.0)
-            aligned = cv2.warpPerspective(idx, H_dewarp, (w_out, h_out), flags=cv2.INTER_LINEAR)
-            aligned = aligned[y:y + h, x:x + w].astype(np.float32)
-            aligned_idx.append(aligned)
-
-        # ---- Warp de reflectancias ----
-        aligned_refs = []
-        for ref in [green_ref, red_ref, redge_ref, nir_ref]:
-            A = cv2.warpPerspective(ref, H_dewarp, (w_out, h_out), flags=cv2.INTER_LINEAR)
-            A = A[y:y + h, x:x + w].astype(np.float32)
-            aligned_refs.append(A)
-
-        # ---- CREAR HYPERCUBO ----
-        # Orden: Green, Red, RedEdge, NIR, NDVI, GNDVI, NDRE, CCCI, MSR, SAVI
-        hypercube = np.stack(
-            aligned_refs + aligned_idx,
-            axis=0
-        ).astype(np.float32)
-
-        print("hypercube:", hypercube.shape)
-        prediction = cls.predict(hypercube[:-1,:,:])
-
-        return prediction, hypercube
-        
+        return pred, get_class_def_nitrogen(self.thresh_stages, pred, stage, self.uncertanty)
+    
 
 if __name__ == "__main__":
     print()

@@ -10,6 +10,7 @@ from reportlab.platypus import (
     Spacer, Image, PageBreak, Frame, PageTemplate, NextPageTemplate
 )
 import os
+from svglib.svglib import svg2rlg
 
 from core.utils import resource_path
 
@@ -68,33 +69,33 @@ def dibujar_pagina_a4(
     logo_width = 100 # Ancho máximo estimado (puedes ajustar)
     y_pos = doc.pagesize[1] - 50 
     
-    # Logo Izquierdo
-    try:
-        x_pos =  doc.leftMargin - 175
-        canvas.drawImage(logo_cite, x_pos, y_pos, height=logo_height, preserveAspectRatio=True, mask='auto')
-    except:
-         canvas.setFillColor(colors.lightgrey)
-         canvas.rect(doc.leftMargin, y_pos, 50, logo_height, fill=1)
+    # # Logo Izquierdo
+    # try:
+    #     x_pos =  doc.leftMargin - 175
+    #     canvas.drawImage(logo_cite, x_pos, y_pos, height=logo_height, preserveAspectRatio=True, mask='auto')
+    # except:
+    #      canvas.setFillColor(colors.lightgrey)
+    #      canvas.rect(doc.leftMargin, y_pos, 50, logo_height, fill=1)
 
-    # Logo Derecho
-    try:
-        page_width = doc.pagesize[0]
-        x_pos = page_width - doc.rightMargin - 100 
-        canvas.drawImage(logo_inictel, x_pos, y_pos, width=logo_width, height=logo_height, preserveAspectRatio=True, anchor='ne', mask='auto')
-    except Exception as e:
-        print(f"Ocurrió un error: {e}")
-        canvas.setFillColor(colors.lightgrey)
-        canvas.rect(doc.pagesize[0] - doc.rightMargin - 50, y_pos, 50, logo_height, fill=1)
+    # # Logo Derecho
+    # try:
+    #     page_width = doc.pagesize[0]
+    #     x_pos = page_width - doc.rightMargin - 100 
+    #     canvas.drawImage(logo_inictel, x_pos, y_pos, width=logo_width, height=logo_height, preserveAspectRatio=True, anchor='ne', mask='auto')
+    # except Exception as e:
+    #     print(f"Ocurrió un error: {e}")
+    #     canvas.setFillColor(colors.lightgrey)
+    #     canvas.rect(doc.pagesize[0] - doc.rightMargin - 50, y_pos, 50, logo_height, fill=1)
     
 
-    try:
-        page_width = doc.pagesize[0]
-        x_pos = page_width - doc.rightMargin - 170 
-        canvas.drawImage(logo_cesal, x_pos, y_pos, width=logo_width, height=logo_height, preserveAspectRatio=True, anchor='ne', mask='auto')
-    except Exception as e:
-        print(f"Ocurrió un error: {e}")
-        canvas.setFillColor(colors.lightgrey)
-        canvas.rect(doc.pagesize[0] - doc.rightMargin - 50, y_pos, 50, logo_height, fill=1)
+    # try:
+    #     page_width = doc.pagesize[0]
+    #     x_pos = page_width - doc.rightMargin - 170 
+    #     canvas.drawImage(logo_cesal, x_pos, y_pos, width=logo_width, height=logo_height, preserveAspectRatio=True, anchor='ne', mask='auto')
+    # except Exception as e:
+    #     print(f"Ocurrió un error: {e}")
+    #     canvas.setFillColor(colors.lightgrey)
+    #     canvas.rect(doc.pagesize[0] - doc.rightMargin - 50, y_pos, 50, logo_height, fill=1)
 
     canvas.restoreState()
 
@@ -138,6 +139,10 @@ def add_results_table_section(trees_data, elements, header_section_style, t_line
     elements.append(t_line) 
     elements.append(Spacer(1, 15))
 
+    #sal_trees = [ r for r in trees_result if r['N_class'] == "saludable"]
+    #        prec_trees = [r for r in trees_result if r['N_class'] == "precaución"]
+    #        def_trees = [ r for r in trees_result if r['N_class'] == "deficiencia"]
+    
     # Tablas de Árboles
     columnas_por_fila = 5
     chunks = [trees_data[i:i + columnas_por_fila] for i in range(0, len(trees_data), columnas_por_fila)]
@@ -152,7 +157,7 @@ def add_results_table_section(trees_data, elements, header_section_style, t_line
         while len(row_ids) < columnas_por_fila:
             row_ids.append(""); row_diag.append(""); row_ndvi.append("")
         
-        t_res = Table([["Árbol"] + row_ids, ["DIAGNÓSTICO"] + row_diag, ["NDVI Promedio"] + row_ndvi], colWidths=[80] + [80]*6)
+        t_res = Table([["Árbol"] + row_ids, ["DIAGNÓSTICO N."] + row_diag, ["NDVI Promedio"] + row_ndvi], colWidths=[80] + [80]*6)
         style_res = [('GRID', (0,0), (-1,-1), 0.5, colors.grey), ('FONTSIZE', (0,0), (-1,-1), 7), ('ALIGN', (0,0), (-1,-1), 'CENTER'), ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
                      ('BACKGROUND', (0,0), (-1,0), COLOR_AZUL_OSCURO), ('TEXTCOLOR', (0,0), (-1,0), colors.white), ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
                      ('BACKGROUND', (0,1), (0,-1), COLOR_GRIS_CLARO), ('FONTSIZE', (0,1), (0,-1), 6), ('LEFTPADDING', (0,1), (0,-1), 0), ('RIGHTPADDING', (0,1), (0,-1), 0)]
@@ -162,6 +167,27 @@ def add_results_table_section(trees_data, elements, header_section_style, t_line
         elements.append(Spacer(1, 10))
 
     elements.append(PageBreak())
+
+
+def load_svg_icon(filepath, target_size=12):
+    """
+    Carga un archivo SVG y lo escala al tamaño especificado para ReportLab.
+    """
+    drawing = svg2rlg(filepath)
+    
+    if drawing is None:
+        return ""  # Retorna vacío si no encuentra el archivo
+    
+    # Calcular el factor de escala
+    scale_x = target_size / drawing.width
+    scale_y = target_size / drawing.height
+    
+    # Aplicar la escala al dibujo
+    drawing.width = target_size
+    drawing.height = target_size
+    drawing.scale(scale_x, scale_y)
+    
+    return drawing
 
 def add_map_trees_def_n_section(trees_data, map_image, elements, styles, header_section_style, t_line):
     elements.append(Paragraph("III. MAPA DE ÁRBOLES CON POSIBLES DEFICIENCIAS DE NITRÓGENO", header_section_style))
@@ -185,20 +211,28 @@ def add_map_trees_def_n_section(trees_data, map_image, elements, styles, header_
     deficient_count = 0
     warning_count = 0
     
+    ndvi_warn_count = 0
+    ndvi_alert_count = 0
+
     for item in trees_data:
         diag = item.get('N_diagnostico', '')
         if diag == "POSIBLE DEFICIENCIA":
             deficient_count += 1
-        elif diag == "PRECAUCIÓN":
+        elif diag == "POSIBLE NIVEL BAJO":
             warning_count += 1
+        ndvi_state = item.get('ndvi_state', '')
+        
+        if ndvi_state == "precaución":
+            ndvi_warn_count += 1
+        elif ndvi_state == "posible-problema":
+            ndvi_alert_count +=1
 
-            
     healthy_count = total_trees - deficient_count - warning_count
     
     # Calcular porcentajes (evitando división por cero)
-    healthy_pct = f"{round((healthy_count/total_trees)*100)}%" if total_trees > 0 else "0%"
-    warning_pct = f"{round((warning_count/total_trees)*100)}%" if total_trees > 0 else "0%"
-    deficient_pct = f"{round((deficient_count/total_trees)*100)}%" if total_trees > 0 else "0%"
+    healthy_pct = f"{round((healthy_count/total_trees)*100, 2)}%" if total_trees > 0 else "0%"
+    warning_pct = f"{round((warning_count/total_trees)*100, 2)}%" if total_trees > 0 else "0%"
+    deficient_pct = f"{round((deficient_count/total_trees)*100, 2)}%" if total_trees > 0 else "0%"
 
     # 2. Definir Estilos Locales para la tarjeta
     # Título de la tarjeta
@@ -209,25 +243,25 @@ def add_map_trees_def_n_section(trees_data, map_image, elements, styles, header_
     style_card_value = ParagraphStyle('CardVal', parent=styles['Normal'], fontSize=10, textColor=colors.black, alignment=2)
 
     # 3. Crear los elementos visuales
+    # ---------------------------------------------------------
+    # 1. Tu Tabla Original (Distribución de Nitrógeno)
+    # ---------------------------------------------------------
     dot_green = create_dot("#28a745")   # Verde
     dot_yellow = create_dot("#eab308")  # Amarillo/Naranja
-    dot_orange = create_dot("#F97316")
-    
-    # Textos
-    p_header = Paragraph("<b>Distribución de Árboles con Posibles Deficiencias de Nitrogeno</b>", style_card_header)
-    
+    dot_orange = create_dot("#F97316")  # Naranja oscuro
+
+    # Textos de tu tabla original
+    p_header = Paragraph("<b>DISTRIBUCIÓN DE POSIBLES DEFICIENCIAS DE NITROGENO</b>", style_card_header)
+
     p_lbl_healthy = Paragraph("Saludable", style_card_label)
     p_val_healthy = Paragraph(f"<b>{healthy_count} Árboles ({healthy_pct})</b>", style_card_value)
 
-    p_lbl_warn = Paragraph("Precaución", style_card_label)
+    p_lbl_warn = Paragraph("Posible Nivel Bajo", style_card_label)
     p_val_warn = Paragraph(f"<b>{warning_count} Árboles ({warning_pct})</b>", style_card_value)
 
-    p_lbl_def = Paragraph("Con Posible Deficiencia", style_card_label)
+    p_lbl_def = Paragraph("Posible Deficiencia", style_card_label)
     p_val_def = Paragraph(f"<b>{deficient_count} Árboles ({deficient_pct})</b>", style_card_value)
 
-
-    # 4. Armar la data de la Tabla
-    # Estructura: [Header], [Green, Label, Val], [Yellow, Label, Val]
     card_data = [
         [p_header, '', ''], 
         [dot_green, p_lbl_healthy, p_val_healthy],
@@ -235,32 +269,92 @@ def add_map_trees_def_n_section(trees_data, map_image, elements, styles, header_
         [dot_orange, p_lbl_def, p_val_def]
     ]
 
-    # 5. Crear Tabla y Estilos
-    # Anchos: Columna pequeña para el punto, espacio para texto, columna para valor
-    t_breakdown = Table(card_data, colWidths=[8*mm, 60*mm, 50*mm], hAlign='LEFT')
-
+    t_breakdown = Table(card_data, colWidths=[8*mm, 25*mm, 40*mm], hAlign='LEFT')
     t_breakdown.setStyle(TableStyle([
-        # General
         ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
         ('BACKGROUND', (0,0), (-1,-1), colors.white),
-        
-        # Header (Fila 0)
-        ('SPAN', (0,0), (-1,0)), # Fusionar columnas
+        ('SPAN', (0,0), (-1,0)), 
         ('BOTTOMPADDING', (0,0), (-1,0), 8),
-        ('LINEBELOW', (0,0), (-1,0), 1, colors.HexColor("#dcdcdc")), # Línea gris fina
-        
-        # Filas de datos
+        ('LINEBELOW', (0,0), (-1,0), 1, colors.HexColor("#dcdcdc")),
         ('TOPPADDING', (0,1), (-1,-1), 8),
         ('BOTTOMPADDING', (0,1), (-1,-1), 8),
-        
-        # Línea divisoria entre Healthy y Deficient
-        ('LINEBELOW', (0,1), (-1,1), 1, colors.HexColor("#dcdcdc")),
-
-        # Borde exterior (Caja verde suave)
+        ('LINEBELOW', (0,1), (-1,2), 1, colors.HexColor("#f0f0f0")), # Separadores suaves
         ('BOX', (0,0), (-1,-1), 1, colors.HexColor("#A8D5BA")),
     ]))
 
-    elements.append(t_breakdown)
+    # ---------------------------------------------------------
+    # 2. La Nueva Tabla NDVI (Basada en la imagen)
+    # ---------------------------------------------------------
+    # Variables de ejemplo (Reemplázalas con tus variables reales)
+    ndvi_norm_cnt = total_trees - ndvi_alert_count - ndvi_warn_count
+    ndvi_norm_pct = round(ndvi_norm_cnt / total_trees, 2)
+    ndvi_bajo_pct = round(ndvi_warn_count / total_trees, 2)
+    ndvi_muyb_pct = round(ndvi_alert_count / total_trees, 2)
+
+    
+    #ndvi_bajo_pct, ndvi_bajo_cnt = "0.94%", 1
+    #ndvi_muyb_pct, ndvi_muyb_cnt = "0.01%", 1
+
+    # Usamos etiquetas <font> de ReportLab para darle color exacto a porcentajes y texto gris
+    p_ndvi_header = Paragraph("<b>DISTRIBUCION DE NDVI </b>", style_card_header)
+    f"<b>{warning_count} Árboles ({warning_pct})</b>"
+    p_lbl_norm = Paragraph("Normal", style_card_label)
+    p_pct_norm = Paragraph(f"<b>{ndvi_norm_cnt} Árboles ({ndvi_norm_pct})</b>", style_card_value)
+    #p_cnt_norm = Paragraph(f"<font color='#6b7280'>({ndvi_norm_cnt} Árboles)</font>", style_card_value)
+
+    p_lbl_bajo = Paragraph("Bajo (Alerta)", style_card_label)
+    p_pct_bajo = Paragraph(f"<b>{ndvi_warn_count} Árboles ({ndvi_bajo_pct})</b>", style_card_value)
+    #p_cnt_bajo = Paragraph(f"<font color='#6b7280'>({ndvi_bajo_cnt} Árboles)</font>", style_card_value)
+
+    p_lbl_muyb = Paragraph("Muy Bajo (Pos. Problema)", style_card_label)
+    p_pct_muyb = Paragraph(f"<b>{ndvi_alert_count} Árboles ({ndvi_muyb_pct})</b>", style_card_value)
+    #p_cnt_muyb = Paragraph(f"<font color='#6b7280'>({ndvi_muyb_cnt} Árboles)</font>", style_card_value)
+    
+    icon_yellow = load_svg_icon(resource_path("assets/warn_icon.svg"), target_size=12)
+    icon_orange = load_svg_icon(resource_path("assets/alert_orange_icon.svg"), target_size=12)
+
+    # La primera fila ("Normal") no tiene icono en la imagen, pasamos un string vacío ''
+    card_data_ndvi = [
+        [p_ndvi_header, '', ''],
+        ['', p_lbl_norm, p_pct_norm],
+        [icon_yellow, p_lbl_bajo, p_pct_bajo],
+        [icon_orange, p_lbl_muyb, p_pct_muyb]
+    ]
+
+    # 4 columnas: [Icono, Etiqueta, Porcentaje, Conteo]
+    t_ndvi = Table(card_data_ndvi, colWidths=[8*mm, 25*mm, 40*mm], hAlign='LEFT')
+    t_ndvi.setStyle(TableStyle([
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('BACKGROUND', (0,0), (-1,-1), colors.white),
+        ('SPAN', (0,0), (-1,0)), 
+        ('BOTTOMPADDING', (0,0), (-1,0), 8),
+        ('LINEBELOW', (0,0), (-1,0), 1, colors.HexColor("#dcdcdc")),
+        ('TOPPADDING', (0,1), (-1,-1), 8),
+        ('BOTTOMPADDING', (0,1), (-1,-1), 8),
+        ('LINEBELOW', (0,1), (-1,2), 1, colors.HexColor("#f0f0f0")), # Separadores suaves
+        ('BOX', (0,0), (-1,-1), 1, colors.HexColor("#dcdcdc")), # Borde gris claro
+    ]))
+
+    # ---------------------------------------------------------
+    # 3. Posicionar ambas tablas LADO a LADO
+    # ---------------------------------------------------------
+    # Creamos una tabla "contenedor" que sostiene a las dos tablas en una sola fila
+    # El espacio en medio (Spacer(5*mm, 0)) actúa como un margen entre las dos tablas
+    container_data = [
+        [t_breakdown, Spacer(5*mm, 0), t_ndvi]
+    ]
+
+    t_container = Table(container_data, colWidths=[73*mm, 5*mm, 73*mm], hAlign='CENTER')
+    t_container.setStyle(TableStyle([
+        ('VALIGN', (0,0), (-1,-1), 'TOP'), # Alinea ambas tablas arriba
+        ('LEFTPADDING', (0,0), (-1,-1), 0),
+        ('RIGHTPADDING', (0,0), (-1,-1), 0),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 0),
+        ('TOPPADDING', (0,0), (-1,-1), 0),
+    ]))
+
+    # Agregamos la tabla contenedora a los elementos del PDF
+    elements.append(t_container)
 
     elements.append(Spacer(1, 30))
     elements.append(PageBreak())
@@ -285,19 +379,26 @@ def add_map_trees_def_zn_section(trees_data, map_image, elements, styles, header
 
     # 1. Calcular Estadísticas basándonos en trees_data
     total_trees = len(trees_data)
-    deficient_count = 0
-    
+    #deficient_count = 0
+    mcari_warn_count = 0
+    mcari_alert_count = 0
     # Usamos la misma lógica que usaste para las filas naranjas
     for item in trees_data:
-        diag = item.get('Zn_class', '')
-        if diag!= "saludable":
-            deficient_count += 1
+        mcari_state = item.get('mcari_state', '')
+        
+        if mcari_state == "precaución":
+            mcari_warn_count += 1
+        elif mcari_state == "posible-problema":
+            mcari_alert_count +=1
+
+    print("mcari_warn_count:", mcari_warn_count)
             
-    healthy_count = total_trees - deficient_count
+    healthy_count = total_trees - mcari_warn_count - mcari_alert_count
     
     # Calcular porcentajes (evitando división por cero)
-    healthy_pct = f"{round((healthy_count/total_trees)*100)}%" if total_trees > 0 else "0%"
-    deficient_pct = f"{round((deficient_count/total_trees)*100)}%" if total_trees > 0 else "0%"
+    healthy_pct = f"{round((healthy_count/total_trees)*100, 2)}%" if total_trees > 0 else "0%"
+    mcari_warn_pct = f"{round((mcari_warn_count/total_trees)*100, 2)}%" if total_trees > 0 else "0%"
+    mcari_alert_pct = f"{round((mcari_alert_count/total_trees)*100, 2)}%" if total_trees > 0 else "0%"
 
     # 2. Definir Estilos Locales para la tarjeta
     # Título de la tarjeta
@@ -310,15 +411,19 @@ def add_map_trees_def_zn_section(trees_data, map_image, elements, styles, header
     # 3. Crear los elementos visuales
     dot_green = create_dot("#28a745")   # Verde
     dot_yellow = create_dot("#eab308")  # Amarillo/Naranja
-    
+    icon_yellow = load_svg_icon(resource_path("assets/warn_icon.svg"), target_size=12)
+    icon_orange = load_svg_icon(resource_path("assets/alert_orange_icon.svg"), target_size=12)
     # Textos
     p_header = Paragraph("<b>Distribución de Árboles con Posibles Problemas de Zinc</b>", style_card_header)
     
     p_lbl_healthy = Paragraph("Saludable", style_card_label)
     p_val_healthy = Paragraph(f"<b>{healthy_count} Árboles ({healthy_pct})</b>", style_card_value)
     
-    p_lbl_def = Paragraph("Precaucion", style_card_label)
-    p_val_def = Paragraph(f"<b>{deficient_count} Árboles ({deficient_pct})</b>", style_card_value)
+    p_lbl_def = Paragraph("Precaucion (MCARI bajo)", style_card_label)
+    p_val_def = Paragraph(f"<b>{mcari_warn_count} Árboles ({mcari_warn_pct})</b>", style_card_value)
+
+    p_lbl_prob = Paragraph("Posible Problema (MCARI my bajo)", style_card_label)
+    p_val_prob = Paragraph(f"<b>{mcari_alert_count} Árboles ({mcari_alert_pct})</b>", style_card_value)
 
 
     # 4. Armar la data de la Tabla
@@ -326,7 +431,8 @@ def add_map_trees_def_zn_section(trees_data, map_image, elements, styles, header
     card_data = [
         [p_header, '', ''], 
         [dot_green, p_lbl_healthy, p_val_healthy],
-        [dot_yellow, p_lbl_def, p_val_def]
+        [icon_yellow, p_lbl_def, p_val_def],
+        [icon_orange, p_lbl_prob, p_val_prob]
     ]
 
     # 5. Crear Tabla y Estilos
@@ -392,8 +498,12 @@ def crear_reporte(filename,
 
         template_a3 = PageTemplate(id='PlantillaMapaGigante', frames=[frame_a3], onPage=on_page_A3_map, pagesize=landscape(A3))
         
+        on_page_A3_map_zinc = lambda canvas, doc: dibujar_pagina_final_a3(canvas, doc, zinc_map_image, final_page_size)
+
+        template_a3_zinc = PageTemplate(id='PlantillaMapaGiganteZinc', frames=[frame_a3], onPage=on_page_A3_map_zinc, pagesize=landscape(A3))
+
         # Agregamos AMBAS plantillas. Al poner 'template_a4' primero, será la default.
-        doc.addPageTemplates([template_a4, template_a3])
+        doc.addPageTemplates([template_a4, template_a3, template_a3_zinc])
     else:
         doc.addPageTemplates([template_a4])
 
@@ -430,6 +540,10 @@ def crear_reporte(filename,
     # --- TRANSICIÓN A PÁGINA A3 ---
     if final_page_size:
         elements.append(NextPageTemplate('PlantillaMapaGigante'))
+        elements.append(PageBreak())
+        elements.append(Paragraph(" ", styles['Normal'])) # Párrafo vacío necesario
+
+        elements.append(NextPageTemplate('PlantillaMapaGiganteZinc'))
         elements.append(PageBreak())
         elements.append(Paragraph(" ", styles['Normal'])) # Párrafo vacío necesario
 

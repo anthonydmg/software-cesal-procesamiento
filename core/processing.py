@@ -19,8 +19,11 @@ import pandas as pd
 import json
 import copy
 import random
-
-from core.deficiency_classifier import NitrogenDefClassifer
+import math
+import heapq
+from core.constants import THRESH_STAGES_DEFAULT
+from core.deficiency_classifier import NitrogenDefClassiferML
+from core.utils import resource_path
 
 class FusionMethod(Enum):
     SIMPLE_AVERAGE = 1
@@ -70,6 +73,109 @@ class Camara_M3M:
     pixel_size_h = high_sensor / high_px  # ej: 13.2 mm / 5472 px = 2.4 µm/px
     focal_length = 12.29
 
+def solve_empirical_line_calibration(dn,rho):
+        '''
+        Empirical Line Calibration (ELC) ρ=aDN+b
+        '''
+        if len(dn) == 2:
+            a = (rho[1] - rho[0]) / (dn[1] - dn[0])
+            b = rho[0] - a * dn[0]
+
+        elif len(dn) > 2:
+            A = np.vstack([dn, np.ones(len(dn))]).T
+            a, b = np.linalg.lstsq(A, rho, rcond=None)[0]
+
+        else:
+            raise ValueError("At least two calibration targets required")
+
+        return float(a), float(b)
+
+def estimate_elc_params(elc_targets_data):
+    
+    #reflectance_panels = None
+    
+    #with open(resource_path("assets/reflectance_panels.json"), "r") as fp:
+    #    reflectance_panels = json.load(fp)
+    
+    #if reflectance_panels is None:
+    #    return None
+    
+    for band_name, band_info in elc_targets_data.items():
+        rois = band_info["rois"]
+        img_path = band_info["image_path"]
+        meta = band_info["metadata"]
+        reflectance_panels = band_info["reflectance_panels"]
+        Icorr, _ = per_band_pipeline(img_path, meta)
+
+        ## Corregir Exposicion y ganancia
+        Icorr = img_signal(Icorr, meta["bits"], meta["black"], meta["gain"], meta["exp_us"])   # Eq. 9
+        Icorr = Icorr * meta["pCam"]
+        dn_values = []
+        reflectances = []
+        
+        for roi_name, roi in rois.items():
+            mask_roi = np.zeros_like(Icorr)
+
+            roi_arr = np.array([[int(pt[0]), int(pt[1])] for pt in roi])
+            roi_arr = roi_arr.reshape((-1, 1, 2))
+            cv2.fillPoly(mask_roi, [roi_arr], 255)
+            dn_mean = Icorr[mask_roi > 0].mean()
+            dn_values.append(dn_mean)
+            ref_target = reflectance_panels[roi_name]
+            #reflectance_bands = reflectance_panels[roi_name]["reflectance_bands"]
+            #ref_target = reflectance_bands[band_name.lower()]
+            reflectances.append(ref_target)
+        
+        a, b = solve_empirical_line_calibration(dn_values, reflectances)
+
+        band_info["elc_params"] = [a, b]
+
+def process_features_extraction(images_data, work_megapix = 0.6):
+    for im_data in enumerate(images_data): #tqdm(images_data, desc="Keypoints Detection"):
+        im_path = im_data['relative_path']
+        img = cv2.imread(im_path)
+        img_undistorned = undistort_with_meta(img, im_data) #distortion_correction(img)
+        
+        work_scale = min(1.0, np.sqrt(work_megapix * 1e6 / (img_undistorned.shape[0] * img_undistorned.shape[1])))
+        img_resized = cv2.resize(img_undistorned, None, fx=work_scale, fy=work_scale, interpolation=cv2.INTER_LINEAR_EXACT) 
+
+        kp_img, desc_img, _ = detect_keypoint_descriptors(img_resized, "SIFT", draw_keypoints = False, nfeatures = 50000)
+        im_data['kp_img'] = kp_img
+        im_data['desc_img'] = desc_img
+        
+        h_ws, w_ws = img_resized.shape[:2]
+
+        im_data['w_ws'] = w_ws
+        im_data["h_ws"] = h_ws
+        im_data["work_scale"] = work_scale
+    
+    return images_data
+
+def draw_detections(image, segmentations, bboxes=None, alpha=0.45):
+    img_out = image.copy()
+    
+    for i, seg in enumerate(segmentations):
+        if len(seg) == 0: continue
+        pts = np.array(seg, dtype=np.int32).reshape(-1, 1, 2)
+        
+        
+        color = (255, 200, 0)
+        cv2.fillPoly(img_out, [pts], color)
+        
+        # Se usa una validación simple de índices por si hay múltiples polígonos por caja
+        # (En YOLO seg, es 1 caja -> N polígonos si el objeto está dividido visualmente)
+        box_idx = i if i < len(bboxes) else 0 
+        
+        if bboxes is not None and box_idx < len(bboxes):
+            bbox = bboxes[box_idx].copy()
+            
+            x1, y1, x2, y2 = map(int, bbox)
+            cv2.rectangle(img_out, (x1, y1), (x2, y2), (0, 0, 255), 1)
+
+        
+    final = cv2.addWeighted(img_out, alpha, image, 1 - alpha, 0)
+    return final
+
 def crop_image(image, bbox):
     (x_min, y_min), (x_max, y_max) = bbox
     return image[y_min:y_max+1, x_min:x_max+1]
@@ -79,8 +185,6 @@ def distortion_correction(img, K = Camara_M3M.K, dist = Camara_M3M.dist):
 
 def load_gray16(path):
     I = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-    print("I:", I.shape)
-    print("I.ndim:", I.ndim)
     if I is None:
         raise RuntimeError(f"Could not read {path}")
     if I.ndim == 3 and I.shape[-1] > 1:
@@ -293,7 +397,10 @@ def angles_euler_gimbal_fix_orientation(yaw_degree_gimbal, pitch_degree_gimbal, 
 
     if pitch_degree_gimbal < 0.0:
         pitch_degree_gimbal += 90.0
-
+    
+    pitch_degree_gimbal = 0.0
+    roll_degree_gimbal =  0.0
+    # "pitch_degree": ,
     return yaw_degree_gimbal, pitch_degree_gimbal, roll_degree_gimbal
 
 def rotation_matrix_cam(yaw_degree_gimbal, pitch_degree_gimbal, roll_degree_gimbal):
@@ -505,7 +612,7 @@ def detect_keypoint_descriptors_in_dom(img_dom, corners_img, detector_type = "OR
     return kp_img_dom, desc_img, elapsed_time
 
 def process_detect_keypoint_descriptors_in_dom(images_data, dom_size, detector_keypoint = "SIFT"):
-    for im_data in tqdm(images_data,"keypoints Detection:"):
+    for im_data in images_data: #tqdm(images_data,"keypoints Detection:"):
         im_path = im_data['relative_im_path']
         H_rtk = im_data['H_rtk']
         terrain_points_dom = im_data['terrain_points_dom'].astype(np.int32)
@@ -575,7 +682,7 @@ def match_keypoints_with_flann(
         # Ratio Test de Lowe
         good_matches = []
         for m, n in matches:
-            if m.distance < 0.7 * n.distance:  # Ratio típico para SIFT/SURF
+            if m.distance < 0.65 * n.distance:  # Ratio típico para SIFT/SURF
                 good_matches.append(m)
         return good_matches
     
@@ -640,7 +747,7 @@ def calculate_pairwase_matches(all_images_data):
     all_terrain_points_dom = [im_data['terrain_points_dom'] for im_data in all_images_data]
     overlap_graph  = build_overlap_graph(all_terrain_points_dom, min_overlap=0.45)
     matches =  {}
-    for i, nbrs in tqdm(overlap_graph.items(), desc= "Image"):
+    for i, nbrs in overlap_graph.items(): #tqdm(overlap_graph.items(), desc= "Image"):
         for j, _ in nbrs:
             desc_i = all_images_data[i]['desc_img_dom']
             #kp_img_dom_i = all_images_data[i]['kp_img_dom']
@@ -667,54 +774,68 @@ def estimate_translation_ransac(src_pts, dst_pts, max_iters=1000, threshold=1.0)
     M[0,2], M[1,2] = best_tx, best_ty
     return M, best_inliers
 
-def estimate_pairwase_homographies(overlap_graph, all_images_data, transform_type = "homography", ransac_thresh = RANSAC_THRESH, min_matches_per_edges = MIN_MATCHES_FOR_EDGE):
+def estimate_pairwase_homographies(overlap_graph, all_images_data, transform_type = "homography", ransac_thresh = 4.0, min_matches_per_edges = 20):
     edges = []
+    edges_low = []
     n = len(all_images_data)
-    for i, neighboards in tqdm(overlap_graph.items(),"Pairwase Edges"):
+    for i, neighboards in overlap_graph.items(): #tqdm(overlap_graph.items(),"Pairwase Edges"):
+
         neighboards_ids = [neigh[0] for neigh in neighboards]
+        print(f"neighboards_ids ({i}):", neighboards_ids)
         for j in range(i+1, n):
             if j not in neighboards_ids:
                 continue
-            desc_i = all_images_data[i]['desc_img_dom']
-            kp_img_dom_i = all_images_data[i]['kp_img_dom']
-            #print("kp_img_dom_i", kp_img_dom_i)
-            desc_j = all_images_data[j]['desc_img_dom']
-            kp_img_dom_j = all_images_data[j]['kp_img_dom']
-            good_matches = match_keypoints_with_flann(desc_i, desc_j, detector_type="SIFT")
+            H_rtk_i = all_images_data[i]['H_rtk'] 
+            desc_i = all_images_data[i]['desc_img']
+            kp_img_i = all_images_data[i]['kp_img']
 
-            if len(good_matches) < 8:
-                 continue
+            desc_j = all_images_data[j]['desc_img']
+            kp_img_j = all_images_data[j]['kp_img']
+            H_rtk_j = all_images_data[j]['H_rtk'] 
             
-            pts_i = np.array([kp_img_dom_i[m.queryIdx].pt for m in good_matches], dtype=np.float32)
-            pts_j = np.array([kp_img_dom_j[m.trainIdx].pt for m in good_matches], dtype=np.float32)
+            good_matches = match_keypoints_with_flann(desc_i, desc_j, detector_type="SIFT")
+            print(f"good_matches j:({j}):", len(good_matches))
+            if len(good_matches) < 5:
+                print("Pocos good matches")
+                continue
             
+            pts_i = np.array([kp_img_i[m.queryIdx].pt for m in good_matches], dtype=np.float32)
+            pts_j = np.array([kp_img_j[m.trainIdx].pt for m in good_matches], dtype=np.float32)
+            
+            pts_i_trans = cv2.perspectiveTransform(pts_i.reshape(-1, 1, 2), H_rtk_i)
+            pts_j_trans = cv2.perspectiveTransform(pts_j.reshape(-1, 1, 2), H_rtk_j)
+
             if transform_type == 'homography': # 8 grados de libertad
-                H, mask = cv2.findHomography(pts_j, pts_i, cv2.RANSAC, ransac_thresh)
+                H, mask = cv2.findHomography(pts_j_trans, pts_i_trans, cv2.RANSAC, ransac_thresh)
             elif transform_type == 'similarity': # 4 grados de libertad
-                H, mask = cv2.estimateAffinePartial2D(pts_j, pts_i, method=cv2.RANSAC, ransacReprojThreshold= RANSAC_THRESH)
+                H, mask = cv2.estimateAffinePartial2D(pts_j_trans, pts_i_trans, method=cv2.RANSAC, ransacReprojThreshold= ransac_thresh)
                 H = np.vstack([H, [0, 0, 1]])
             elif transform_type == 'affine':    # 6 grados de libertad
-                H, mask = cv2.estimateAffine2D(pts_j, pts_i, method=cv2.RANSAC, ransacReprojThreshold= RANSAC_THRESH)
+                H, mask = cv2.estimateAffine2D(pts_j_trans, pts_i_trans, method=cv2.RANSAC, ransacReprojThreshold= ransac_thresh)
                 if H is None or H.shape != (2, 3):
                     print(f"⚠️ Transformación inválida entre imágenes {i} y {j}, se salta")
                     continue
                     #H = np.eye(3, dtype=np.float32) 
                 H = np.vstack([H, [0, 0, 1]])
             else:
-                H, mask = cv2.findHomography(pts_j, pts_i, cv2.RANSAC, RANSAC_THRESH) 
+                H, mask = cv2.findHomography(pts_j_trans, pts_i_trans, cv2.RANSAC, ransac_thresh) 
             
             if H is None:
-                 continue
+                print(f"Homografies H none ({i}, {j}):", inliers)
+                continue
             
             mask = mask.ravel().astype(bool)
             #print("Mask:", mask)
             inliers = mask.sum()
-            print(f"inliers ({i}, {j}):", inliers)
-
+            #print(f"inliers ({i}, {j}):", inliers)
             if inliers >= min_matches_per_edges:  # Mínimo para estimar transformación
-                edges.append((i, j, H, mask, inliers, pts_i, pts_j))
+                print(f"noo falta inliers ({i}, {j}):", inliers)
+                edges.append((i, j, H, mask, inliers, pts_i_trans, pts_j_trans))
+            else:
+                edges_low.append((i, j, H, mask, inliers, pts_i_trans, pts_j_trans))
+                print(f"falta inliers ({i}, {j}):", inliers)
     
-    return edges
+    return edges, edges_low
 
 def estimate_pairwise_transforms(all_images_data, matches, transform_type='similarity'):
     """Estima transformaciones entre pares de imágenes"""
@@ -859,9 +980,8 @@ def build_adjacency_graph_from_edges(n, edges):
     """Construye lista de adyacencia con peso = -num_inliers (queremos MST con mayor inliers)."""
     adj_graph = { i: [] for i in range(n)}
     for (i,j,H,mask,inliers,pts_i,pts_j) in edges:
-        w = -inliers
-        adj_graph[i].append((j, w, H, mask, pts_i, pts_j))
-        adj_graph[j].append((i, w, np.linalg.inv(H), mask, pts_j, pts_i))
+        adj_graph[i].append((j, H, mask, pts_i, pts_j))
+        adj_graph[j].append((i, np.linalg.inv(H), mask, pts_j, pts_i))
     return adj_graph
 
 def prim_mst(n, adj_graph):
@@ -929,119 +1049,6 @@ def prim_mst_2(n, adj_graph):
     
     return mst_edges
 
-def build_lineal_system(all_images_data, inliers, scale_factor):
-    # Inicialización de listas para COO
-    weight = 5
-    row_data = []
-    row_indices = []
-    col_indices = []
-    b_list = []
-    row_counter = 0
-    # 1. Restricciones de referencia (para imagen 0)
-    ref_values = [1, 0, 0, 0, 1, 0]  # a, b, tx, c, d, ty
-    for col_idx, val in enumerate(ref_values):
-        row_data.append(weight)
-        row_indices.append(row_counter)
-        col_indices.append(col_idx)
-        b_list.append(weight * val)
-        row_counter += 1
-    n = len(all_images_data)
-    num_params = 6 * n
-    # 2. Restricciones de similitud: a ≈ d, b ≈ -c
-    for i in range(n):
-        # T₁₁ = T₂₂
-        row_data.extend([1.0, -1.0])
-        row_indices.extend([row_counter] * 2)
-        col_indices.extend([6 * i, 6 * i + 4])
-        b_list.append(0)
-        row_counter += 1
-
-        # T₁₂ = -T₂₁  → T₁₂ + T₂₁ = 0
-        row_data.extend([1.0, 1.0])
-        row_indices.extend([row_counter] * 2)
-        col_indices.extend([6 * i + 1, 6 * i + 3])
-        b_list.append(0)
-        row_counter += 1
-
-
-    # 4. Restricciones de reproyección
-    for (i, j), match_list in tqdm(inliers.items(), desc="Matches"):
-        kp_i = all_images_data[i]['kp_img_dom']
-        kp_j = all_images_data[j]['kp_img_dom']
-        selected_matches = match_list[:60]
-
-        for m in selected_matches:
-            src_pt = np.array([*kp_i[m.queryIdx].pt, 1.0])
-            dst_pt = np.array([*kp_j[m.trainIdx].pt, 1.0])
-
-            # Escalar para evitar magnitudes grandes
-            src_pt_scaled = src_pt * scale_factor
-            dst_pt_scaled = dst_pt * scale_factor
-
-            # Ecuación para coordenada X
-            for k in range(3):
-                row_data.extend([src_pt_scaled[k], -dst_pt_scaled[k]])
-                row_indices.extend([row_counter, row_counter])
-                col_indices.extend([6 * i + k, 6 * j + k])
-            b_list.append(0)
-            row_counter += 1
-
-            # Ecuación para coordenada Y
-            for k in range(3):
-                row_data.extend([src_pt_scaled[k], -dst_pt_scaled[k]])
-                row_indices.extend([row_counter, row_counter])
-                col_indices.extend([6 * i + 3 + k, 6 * j + 3 + k])
-            b_list.append(0)
-            row_counter += 1
-
-    # Construcción del sistema disperso
-    A = coo_matrix((row_data, (row_indices, col_indices)), shape=(row_counter, num_params)).tocsr()
-    b = np.array(b_list)
-    return A, b
-
-
-def solve_global_transforms(A, b, n_images, scale_factor):
-    solution = lsqr(A, b, atol=1e-6, btol=1e-6)[0]
-    # Reorganizar las transformaciones
-    global_transforms = []
-    for i in tqdm(range(n_images), desc="Images"):
-        T1 = solution[6*i:6*i+3]
-        T1[2] = T1[2] / scale_factor
-        T2 = solution[6*i+3:6*i+6]
-        T2[2] = T2[2] / scale_factor
-        M = np.vstack([T1, T2, [0, 0, 1]])
-        global_transforms.append(M)
-    
-    return global_transforms
-
-def create_mosaic(all_images_data, global_transforms, dom_shape):
-    blended = np.zeros((dom_shape[0], dom_shape[1], 3), dtype=np.float32)
-    total_weights = np.zeros((dom_shape[0], dom_shape[1]), dtype=np.float32)
-
-    n_images = len(all_images_data)
-    for index, row in tqdm(all_images_data.items(), total= n_images, desc = "Build Mosaic"):
-        image = cv2.imread(row['relative_im_path'])
-        image_distortion = distortion_correction(image)
-        H_rtk = row['H_rtk']
-        terrain_points_dom = row['terrain_points_dom']
-        imagen_proyectada, mask = direct_project_image_to_dom(image_distortion, H_rtk, dom_shape, terrain_points_dom)
-
-
-        projected_corrected = cv2.warpPerspective(imagen_proyectada, global_transforms[index], (int(dom_shape[1]), int(dom_shape[0])))
-        mask = cv2.warpPerspective(mask, global_transforms[index], (int(dom_shape[1]), int(dom_shape[0])))
-        weights = calculate_weights(mask, None, FusionMethod.ROBUST_DRONE)
-        max_weight = np.max(weights)
-        if max_weight > 0:
-            weights = weights / max_weight
-        update_mask = weights > total_weights
-        blended[update_mask] = projected_corrected[update_mask]
-        total_weights = np.maximum(total_weights, weights)
-
-
-    final_dom = blended.astype(np.uint8).copy()
-    
-    return final_dom
-
 def initialize_homographies(n, mst_edges):
     """Inicializa H_i con H_root = I, propaga por MST."""
     H_abs = [None] * n
@@ -1089,141 +1096,6 @@ def initialize_homographies(n, mst_edges):
     
     return H_abs
 
-
-def initialize_homographies2(n, mst_edges):
-    """Inicializa H_i con H_root = I, propaga por MST."""
-    H_abs = [None] * n
-    H_abs[0] = np.eye(3)
-
-    # Construir lista de hijos por propagacion
-    added = {0}
-    adj_map = {}
-
-    #inliers_masks_abs = np.full((n,n), None, dtype=bool)
-
-    inliers_masks_abs = [[None] * n for _ in range(n)]
-    for (u,v,H,mask,pts_u,pts_v) in mst_edges:
-        print("initialize_homographies mask:", len(mask))
-        print("pts_u mask:", len(pts_u))
-        print("pts_v mask:", len(pts_v))
-        adj_map.setdefault(u, []).append((v,H,mask,pts_u,pts_v))
-        adj_map.setdefault(v, []).append((u, np.linalg.inv(H), mask,pts_v,pts_u))
-        inliers_masks_abs[u][v] = [False] * len(pts_u)
-        inliers_masks_abs[v][u] = [False] * len(pts_v)
-
-
-    # BFS propagation
-    queue = [0]
-    while queue:
-        u = queue.pop(0)
-        for (v, H_uv, mask,pts_u,pts_v) in adj_map.get(u, []):
-            if H_abs[v] is None:
-                H_abs[v] = H_abs[u].dot(H_uv)
-                print("inliers_masks_abs[u,v]:",inliers_masks_abs[u][v])
-                print("mask:",mask)
-                inliers_masks_abs[u][v] = mask.copy()
-                inliers_masks_abs[v][u] = mask.copy()
-                queue.append(v)
-            else:
-                src_pts_v = pts_v.reshape(-1, 1, 2)
-                dst_pts_v = cv2.perspectiveTransform(src_pts_v, H_abs[v])
-                dst_pts_u = copy.deepcopy(pts_u.reshape(-1, 1, 2))
-                print("[inliers_masks_abs[v]:", len(inliers_masks_abs[u][v]))
-                print("dst_pts_u:", len(dst_pts_u))
-                print("dst_pts_v:", len(dst_pts_v))
-                dst_pts_u = np.array(dst_pts_u)
-                dst_pts_v = np.array(dst_pts_v)
-                dst_pts_u[inliers_masks_abs[u][v]] = dst_pts_v[inliers_masks_abs[v][u]]
-                H, mask = cv2.estimateAffine2D(dst_pts_v, dst_pts_u, method=cv2.RANSAC, ransacReprojThreshold= RANSAC_THRESH)
-                H = np.vstack([H, [0, 0, 1]])
-                mask = mask.ravel().astype(bool)
-                H_abs[v] = H_abs[v].dot(H)
-                inliers_masks_abs[u][v] = [a or b for a, b in zip(inliers_masks_abs[u][v], mask)]
-                inliers_masks_abs[v][u] = [a or b for a, b in zip(inliers_masks_abs[v][u], mask)]
-                
-        ## Aca es el cambio si es que hay un H_abs aplicar la mascara a los puntos de la imagen luego hacer en homografie con los puntos pero manteniendo los inlieres que habia antes
-    
-    # src_pts = pts_i.reshape(-1, 1, 2)
-
-    # 3. Aplicar la transformación
-    # Esto calcula: P_dst = H * P_src
-    #dst_pts = cv2.perspectiveTransform(src_pts, H)
-
-    # For any disconnected images, set identity
-    for i in range(n):
-        if H_abs[i] is None:
-            print("Desconectado:", i)
-            H_abs[i] = np.eye(3)
-
-    
-    return H_abs
-
-def generate_mosaic(all_images_data, type_align_matrix = "affine", detector_keypoint = "SIFT", signal_progress = None):
-    all_images_data_list = list(all_images_data.values())
-    n_images = len(all_images_data)
-    print("Comienza process_calculate_camera_pose")
-    all_images_data_list = process_calculate_camera_pose(all_images_data_list)
-    if signal_progress is not None:
-        signal_progress.emit(55)
-    print("Comienza process_terrain_points")
-    all_images_data_list = process_terrain_points(all_images_data_list)
-    if signal_progress is not None:
-        signal_progress.emit(60)
-    print("Comienza estimate_dom_parameters")
-    dom_bounds, dom_resolution = estimate_dom_parameters(all_images_data_list, margin_extension = 0.1)
-    width_m = dom_bounds[1] - dom_bounds[0]
-    height_m = dom_bounds[3] - dom_bounds[2]
-    width_px = int(width_m / dom_resolution)
-    height_px = int(height_m / dom_resolution)
-    dom_size = (height_px, width_px)
-
-    if signal_progress is not None:
-        signal_progress.emit(65)
-    print("Comienza process_project_corners_to_dom")
-    all_images_data_list = process_project_corners_to_dom(all_images_data_list, dom_bounds, dom_resolution)
-    if signal_progress is not None:
-        signal_progress.emit(70)
-    print("Comienza process_detect_keypoint_descriptors_in_dom")
-
-    all_images_data_list = process_detect_keypoint_descriptors_in_dom(all_images_data_list, dom_size, detector_keypoint)
-    
-    if signal_progress is not None:
-        signal_progress.emit(75)
-    
-    print("Comienza propagate_pairwise_correction")
-    all_terrain_points_dom = [d['terrain_points_dom'] for d in all_images_data_list]
-
-    # 2. Construir grafo de solapamiento
-    overlap_graph  = build_overlap_graph(all_terrain_points_dom, min_overlap=0.45)
-    # 5) Grafo y MST (Prim). Ruta de propacion
-    edges = estimate_pairwase_homographies(overlap_graph, all_images_data_list, type_align_matrix)
-
-    adj_graph = build_adjacency_graph_from_edges(n_images, edges)
-
-    mst = prim_mst_2(n_images, adj_graph)
-    # 6) Inicialización H absolute vía propagación en MST
-    #H_abs = initialize_homographies(n, mst)
-    #matches = calculate_pairwase_matches(all_images_data_list)
-    #transforms, inliers = estimate_pairwise_transforms(all_images_data_list, matches, transform_type='affine')
-    #scale_factor = 1.0 / dom_size[0]
-    #A, b = build_lineal_system(all_images_data, inliers, scale_factor = scale_factor)
-    #global_transforms = solve_global_transforms(A.tocsr(), b, len(all_images_data), scale_factor = scale_factor)
-    #print("global_transforms:", global_transforms)
-    #if signal_progress is not None:
-    #    signal_progress.emit(85)
-    #print("Comienza transformations")
-    #print("Comienza propagate_pairwise_correction")
-    
-    #final_dom = create_mosaic(all_images_data, global_transforms, dom_shape = (height_px, width_px))
-    #ref_zone_lon = all_images_data[0]['longitude']
-    #save_as_geotiff(
-    #        final_dom, f"campo2_mosaico_graph_queue_refine_{type_align_matrix}_{len(all_images_data)}_images.tif", 
-    #        dom_bounds[0], dom_bounds[3],  # Esquina superior izquierda (X,Y)
-    #        dom_resolution,
-    #        ref_zone_lon
-    #    )
-    if signal_progress is not None:
-        signal_progress.emit(100)
 
 def crop_valid_region(img, mask, tree_mask):
     ys, xs = np.where(mask > 0)
@@ -1389,7 +1261,7 @@ def filter_disconnected_region(contour, im_size):
     largest = max(contours_new, key=cv2.contourArea)
     return largest
 
-def posprocessing_segmentations(segmentations, im_shape, hu1_threshold = 0.75):
+def posprocessing_segmentations_old(segmentations, im_shape, hu1_threshold = 0.75):
     ## eliminar regiones separadas en deteccion
 
     contours = [np.array(seg, dtype=np.int32).reshape((-1,1,2)) for seg in segmentations]
@@ -1423,6 +1295,80 @@ def posprocessing_segmentations(segmentations, im_shape, hu1_threshold = 0.75):
     filtered_contours = [filter_disconnected_region(contour, im_shape) for contour in filtered_contours]
     
     return filtered_contours
+
+def inside_valid_region(contours, im_shape, percent_crop_h = 10, percent_crop_w = 10):
+    # filtrar contornos (contours) y quedarse solo con los que están completamente dentro de una región
+    h, w = im_shape
+    crop_h = (h * percent_crop_h) // 100
+    crop_w = (w * percent_crop_w) // 100
+
+    x_min, x_max = crop_w, w - crop_w
+    y_min, y_max = crop_h, h - crop_h
+    mask = []
+
+    for cnt in contours:
+        pts = cnt.reshape(-1, 2)
+        # Verificar si algún punto está dentro del área válida
+        inside  = np.logical_and.reduce((
+            pts[:, 0] >= x_min,
+            pts[:, 0] <= x_max,
+            pts[:, 1] >= y_min,
+            pts[:, 1] <= y_max
+        ))
+         # Si TODOS los puntos están dentro, mantenemos el contorno
+        if np.all(inside):
+            #filtered_contours.append(cnt)
+            mask.append(True)
+        else:
+             mask.append(False)
+        # Se puede agregar un else para recortar los que no, o tal solo si tenen mas de las 3 cuartas partes dentro
+    return mask
+
+def posprocessing_segmentations(segmentations, im_shape, hu1_threshold = 0.75):
+    ## eliminar regiones separadas en deteccion
+
+    contours = [np.array(seg, dtype=np.int32).reshape((-1,1,2)) for seg in segmentations]
+    mask_valid = inside_valid_region(contours, im_shape)
+    #contours = #filter_valid_region_contours(contours, im_shape)
+    ## Filtar por redondes
+    hu_moments = [contour_hu_moments(contour=contours[i]) for i in range(len(contours))]
+    for i in range(len(hu_moments)):
+        
+        if not mask_valid[i]:
+            continue
+        
+        if hu_moments[i][0] < 77:
+            #print("AQUI ENTRO: i=", i,", hu1=", hu_moments[i][0])
+            conts = [contours[i]]  # el que enviaste
+            # 1. Dibujar el contorno en una máscara vacía
+            mask = np.zeros(im_shape, dtype=np.uint8)
+            cv2.drawContours(mask, conts, -1, 255, -1)
+            # 2. Encontrar regiones separadas
+
+            # --- A) Cierre: une regiones próximas ---
+            kernel = np.ones((7, 7), np.uint8)
+            #closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+            # --- B) Apertura: elimina fragmentos pequeños ---
+            opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, 1)
+            closed = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel,1)
+
+            contours_new, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if not contours_new:
+                mask_valid[i] = False
+                continue
+    
+              # 3. Elegir el contorno más grande por área
+            largest = max(contours_new, key=cv2.contourArea)
+            contours[i] = largest
+            hu_moments[i]= contour_hu_moments(largest)
+
+    mask_valid = [valid and (hu_moments[i][0] >= hu1_threshold) for i, valid in enumerate(mask_valid)]
+
+    #filtered_contours = [contours[i] for i in range(len(contours)) if hu_moments[i][0] >= hu1_threshold]
+    filtered_contours = [filter_disconnected_region(contours[i], im_shape) for i, valid in enumerate(mask_valid) if valid]
+    
+    return filtered_contours, mask_valid
 
 def read_trees_mask(detect_path, im_shape):
     with open(detect_path, "r") as f:
@@ -1461,7 +1407,7 @@ def seg_pts_to_dom(segs, H):
 def match_sames_detects(adj_graph, metadata_images, dom_size):
     all_filtered_segmentations = []
     all_dist_to_centers = []
-    for i in tqdm(range(len(metadata_images)), desc="Filtered Detects"):
+    for i in range(len(metadata_images)): #tqdm(range(len(metadata_images)), desc="Filtered Detects"):
         meta = metadata_images[i]
         detect_path = meta['detections_path']
         im_shape = (meta["image_height"], meta["image_width"])
@@ -1472,7 +1418,7 @@ def match_sames_detects(adj_graph, metadata_images, dom_size):
         all_dist_to_centers.append(dist_to_centers)
 
     same_detects_graph = {}
-    for i, neighbords in tqdm(adj_graph.items(), desc="Trees Matches", total=len(adj_graph)):
+    for i, neighbords in adj_graph.items(): #tqdm(adj_graph.items(), desc="Trees Matches", total=len(adj_graph)):
         filtered_segmentations_i = all_filtered_segmentations[i]
         meta_i = metadata_images[i]
         if len(filtered_segmentations_i) == 0:
@@ -1602,8 +1548,8 @@ def create_map_trees_ids(mosaic_path = None, mosaic_image = None, base_dir = Non
         COLOR_BLANCO = (255, 255, 255)
 
     font = cv2.FONT_HERSHEY_SIMPLEX
-    scale_font = 2
-    thickness_font = 2
+    scale_font = 0.6
+    thickness_font = 1
     alpha_overlay = 0.5
 
     COLOR_SALUDABLE = np.array([0, 255, 50], dtype=np.uint8)
@@ -1622,18 +1568,18 @@ def create_map_trees_ids(mosaic_path = None, mosaic_image = None, base_dir = Non
         tree_id = r["id"]
         
         
-        print("r['mask_path']:", r['mask_path'])
+        #print("r['mask_path']:", r['mask_path'])
         mask = cv2.imread(r['mask_path'],cv2.IMREAD_GRAYSCALE)
         
         if mask is None:
             print("Mascara No encontrada")
             continue
         
-        print("mask.shape", mask.shape)
+        #print("mask.shape", mask.shape)
         # 1. Asegurar que la máscara sea 2D
         if len(mask.shape) == 3:
             mask = mask.squeeze()
-        print("mask.shape")
+        #print("mask.shape")
         h, w = mask.shape
         y_max = y_min + h
         x_max = xmin + w
@@ -1650,7 +1596,7 @@ def create_map_trees_ids(mosaic_path = None, mosaic_image = None, base_dir = Non
         
         overlay_pixels = (pixeles_base * (1 - alpha_overlay)) + (color_mask * alpha_overlay)
         
-        print("overlay_pixels:",  overlay_pixels.shape)
+        #print("overlay_pixels:",  overlay_pixels.shape)
         roi[mask > 0, :3] = overlay_pixels.astype(np.uint8)
 
         #
@@ -1664,15 +1610,30 @@ def create_map_trees_ids(mosaic_path = None, mosaic_image = None, base_dir = Non
         y_text = coord_center[1] + (alto_text // 2)
         posicion_text = (x_text, y_text)
         
+        radius = 10
+        size  = 2 * radius
+        
+        if r["ndvi_state"] != "saludable":
+            if r["ndvi_state"] == "precaución":
+                icon = cv2.imread(resource_path("assets/warn_icon.png"), cv2.IMREAD_UNCHANGED)  # incluye canal alpha
+            else:
+                icon = cv2.imread(resource_path("assets/alert_orange_icon.png"), cv2.IMREAD_UNCHANGED)
+            # separar canales
+          
+            icon = cv2.resize(icon, (size , size ))
+            alpha = icon[:, :, 3] / 255.0
 
-        cv2.circle(
-            mosaic_base,
-            coord_center,
-            15,
-            COLOR_ROJO,
-            thickness=-1
-        )
+            center_y = y_min + h // 2
+            center_x = xmin + w // 2
+            roi_icon = mosaic_base[center_y - radius: center_y + radius, 
+                                center_x - radius: center_x + radius]
 
+            alpha = alpha[:, :, np.newaxis]  # convertir a (H, W, 1)
+
+            roi_icon[:,:,:3] = alpha * icon[:, :, :3] + (1 - alpha) * roi_icon[:,:,:3]
+
+      
+        posicion_text = (x_text - int(radius *1.5), y_text - int(radius *1.5))
         # Dibujamos el texto
         cv2.putText(
             mosaic_base,
@@ -1685,7 +1646,9 @@ def create_map_trees_ids(mosaic_path = None, mosaic_image = None, base_dir = Non
             lineType=cv2.LINE_AA # LINE_AA hace que los bordes del texto se vean suaves
         )
 
-    path_map_trees = f"{base_dir}/mosaic/rgb/map_trees_ids.png"
+    os.makedirs(f"{base_dir}/mosaic/rgb/report_images", exist_ok=True)
+
+    path_map_trees = f"{base_dir}/mosaic/rgb/report_images/map_trees_ids.png"
 
     print("path_map_trees:", path_map_trees)
     mask_region = np.any(mosaic_base != 0, axis=2)
@@ -1701,7 +1664,7 @@ def create_map_trees_ids(mosaic_path = None, mosaic_image = None, base_dir = Non
     mosaic_base = mosaic_base[y_min: y_max + 1, x_min: x_max + 1, :]
     cv2.imwrite(path_map_trees, mosaic_base)
 
-    path_card_map = f"{base_dir}/mosaic/rgb/card_map.png"
+    path_card_map = f"{base_dir}/mosaic/rgb/report_images/card_map.png"
     cv2.imwrite(path_card_map, mosaic_base[:,:,:3])
     return path_map_trees
 
@@ -1737,8 +1700,8 @@ def create_map_trees_ids_zinc(mosaic_path = None, mosaic_image = None, base_dir 
         COLOR_BLANCO = (255, 255, 255)
 
     font = cv2.FONT_HERSHEY_SIMPLEX
-    scale_font = 2
-    thickness_font = 2
+    scale_font = 0.6
+    thickness_font = 1
     alpha_overlay = 0.5
 
     COLOR_SALUDABLE = np.array([0, 255, 50], dtype=np.uint8)
@@ -1753,18 +1716,18 @@ def create_map_trees_ids_zinc(mosaic_path = None, mosaic_image = None, base_dir 
         tree_id = r["id"]
         
         
-        print("r['mask_path']:", r['mask_path'])
+        #print("r['mask_path']:", r['mask_path'])
         mask = cv2.imread(r['mask_path'],cv2.IMREAD_GRAYSCALE)
         
         if mask is None:
             print("Mascara No encontrada")
             continue
         
-        print("mask.shape", mask.shape)
+        #print("mask.shape", mask.shape)
         # 1. Asegurar que la máscara sea 2D
         if len(mask.shape) == 3:
             mask = mask.squeeze()
-        print("mask.shape")
+        #print("mask.shape")
         h, w = mask.shape
         y_max = y_min + h
         x_max = xmin + w
@@ -1772,14 +1735,16 @@ def create_map_trees_ids_zinc(mosaic_path = None, mosaic_image = None, base_dir 
         roi = mosaic_base[y_min:y_max, xmin:x_max]
         pixeles_base = roi[mask > 0, :3]
         
-        if r['Zn_class'].upper() == "PRECAUCIÓN":  
+        if r['Zn_class'] == "precaución":  
             color_mask = COLOR_PRECAUSION
+        elif r['Zn_class'] == "posible-problema":
+            color_mask = COLOR_DEFICIENCIA
         else:
             color_mask = COLOR_SALUDABLE
         
         overlay_pixels = (pixeles_base * (1 - alpha_overlay)) + (color_mask * alpha_overlay)
         
-        print("overlay_pixels:",  overlay_pixels.shape)
+        #print("overlay_pixels:",  overlay_pixels.shape)
         roi[mask > 0, :3] = overlay_pixels.astype(np.uint8)
 
         #
@@ -1793,15 +1758,29 @@ def create_map_trees_ids_zinc(mosaic_path = None, mosaic_image = None, base_dir 
         y_text = coord_center[1] + (alto_text // 2)
         posicion_text = (x_text, y_text)
         
+        radius = 10
+        size  = 2 * radius
+        
+        if r["mcari_state"] != "saludable":
+            if r["mcari_state"] == "precaución":
+                icon = cv2.imread(resource_path("assets/warn_icon.png"), cv2.IMREAD_UNCHANGED)  # incluye canal alpha
+            else:
+                icon = cv2.imread(resource_path("assets/alert_orange_icon.png"), cv2.IMREAD_UNCHANGED)
+            # separar canales
+          
+            icon = cv2.resize(icon, (size , size ))
+            alpha = icon[:, :, 3] / 255.0
 
-        cv2.circle(
-            mosaic_base,
-            coord_center,
-            15,
-            COLOR_ROJO,
-            thickness=-1
-        )
+            center_y = y_min + h // 2
+            center_x = xmin + w // 2
+            roi_icon = mosaic_base[center_y - radius: center_y + radius, 
+                                center_x - radius: center_x + radius]
 
+            alpha = alpha[:, :, np.newaxis]  # convertir a (H, W, 1)
+
+            roi_icon[:,:,:3] = alpha * icon[:, :, :3] + (1 - alpha) * roi_icon[:,:,:3]
+        
+        posicion_text = (x_text - int(radius *1.5), y_text - int(radius *1.5))
         # Dibujamos el texto
         cv2.putText(
             mosaic_base,
@@ -1814,7 +1793,8 @@ def create_map_trees_ids_zinc(mosaic_path = None, mosaic_image = None, base_dir 
             lineType=cv2.LINE_AA # LINE_AA hace que los bordes del texto se vean suaves
         )
 
-    path_map_trees = f"{base_dir}/mosaic/rgb/zinc_map_trees_ids.png"
+    os.makedirs(f"{base_dir}/mosaic/rgb/report_images", exist_ok=True)
+    path_map_trees = f"{base_dir}/mosaic/rgb/report_images/zinc_map_trees_ids.png"
 
     print("path_map_trees:", path_map_trees)
     mask_region = np.any(mosaic_base != 0, axis=2)
@@ -1834,13 +1814,169 @@ def create_map_trees_ids_zinc(mosaic_path = None, mosaic_image = None, base_dir 
     #cv2.imwrite(path_card_map, mosaic_base[:,:,:3])
     return path_map_trees
 
+class MultiSpecImageLoader():
+    def __init__(self, images_data, method_cal = "dls", elc_params = None):
+        self.images_metadata = {img_m['name']:img_m for img_m in images_data}
+        self.elc_params = elc_params
+        self.method_cal = method_cal
+    
+    def _per_band_pipeline(self, path, metadata):
+        """
+        Load -> vignetting -> undistort -> HMatrix warp -> return corrected image and metadata.
+        """
+        I0 = load_gray16(path)
+
+        I1 = vignetting_correct(I0, metadata)
+        I2 = undistort_with_meta(I1, metadata)
+        H_cal = np.array(metadata["H_cal"])
+        I3 = apply_hmatrix(I2, H_cal, out_shape=(I2.shape[1], I2.shape[0]))
+        return I3, metadata
+    
+    def _dls_corr(self, I, meta):
+        irradiance = meta["irradiance"]
+        I_corr =  I / max(irradiance, 1e-12)
+        return I_corr
+    
+    
+        # Corrección de dark level
+        #cam = img_signal(I, metadata["bits"], metadata["black"], metadata["gain"], metadata["exp_us"])
+        
+        # Corrección de ganancia y exposición
+        #print("pCam:",metadata["pCam"])
+        #cam_corr = cam * metadata["pCam"]
+    def _elc_corr(self, I, band):
+        print("correction ELC...")
+        if self.elc_params:
+            a, b = self.elc_params[band]["elc_params"]
+            # ELC
+            I_corr = I * a + b
+            return I_corr
+        
+    
+    def _compute_reflectance(self, Icorr, meta, band_name = None):
+        cam = img_signal(Icorr, meta["bits"], meta["black"], meta["gain"], meta["exp_us"])   # Eq. 9
+        cam_corr = cam * meta["pCam"]
+        #band = meta["band"]
+        if self.method_cal == "ELC" and self.elc_params is not None and band_name is not None:
+            ref = self._elc_corr(cam_corr, band_name)
+        else:
+            ref = self._dls_corr(cam_corr, meta)
+        #print(f"Meta values: pCam={meta['pCam']}, irradiance={meta['irradiance']}, gain={meta['gain']}, exp_us={meta['exp_us']}")
+        # reflectance_X = (X_camera * pCam_X) / (Irradiance_X)
+        #irradiance = meta["irradiance"]
+        #ref = (cam * meta["pCam"]) / max(irradiance, 1e-12)
+
+        #cam = img_signal(Icorr, meta["bits"], meta["black"], meta["gain"], meta["exp_us"])   # Eq. 9
+        # reflectance_X = (X_camera * pCam_X) / (Irradiance_X)
+        #ref = (cam * meta["pCam"]) / max(meta["irradiance"], 1e-12)
+        return ref
+
+    def load_align_bands(self, rgb_path, return_vis = True):
+        base = os.path.basename(rgb_path)
+
+        if "muitispec_bands" in self.images_metadata[base]:
+            muitispec_bands = self.images_metadata[base]['muitispec_bands']
+            base_dir  = os.path.dirname(rgb_path)
+            nir_path   = os.path.join(base_dir, muitispec_bands['nir'])
+            green_path = os.path.join(base_dir, muitispec_bands['g'])
+            redge_path = os.path.join(base_dir, muitispec_bands['re'])
+            red_path   = os.path.join(base_dir, muitispec_bands['r'])
+        
+        else:
+            nir_path   = rgb_path.replace("_D.JPG", "_MS_NIR.TIF")
+            green_path = rgb_path.replace("_D.JPG", "_MS_G.TIF")
+            redge_path = rgb_path.replace("_D.JPG", "_MS_RE.TIF")
+            red_path   = rgb_path.replace("_D.JPG", "_MS_R.TIF")
+
+        nir_basename = os.path.basename(nir_path)
+        green_basename = os.path.basename(green_path)
+        redge_basename = os.path.basename(redge_path)
+        red_basename = os.path.basename(red_path)
+
+
+        if not all(os.path.exists(p) for p in [nir_path, green_path, redge_path]):
+            print(f"Saltando {base}: faltan bandas.")
+            return None
+
+        nir_file_metadata = self.images_metadata.get(nir_basename, None)
+        green_file_metadata = self.images_metadata.get(green_basename, None)
+        redge_file_metadata = self.images_metadata.get(redge_basename, None)
+        red_file_metadata = self.images_metadata.get(red_basename, None)
+        
+
+        # ---- Calibración de cada banda ----
+        nir_corr, mn   = self._per_band_pipeline(nir_path, nir_file_metadata)
+        red_corr, mr   = self._per_band_pipeline(red_path, red_file_metadata)
+        green_corr, mg = self._per_band_pipeline(green_path, green_file_metadata)
+        redge_corr, mre = self._per_band_pipeline(redge_path, redge_file_metadata)
+
+        # ---- Reflectancias ----
+        nir_ref   = self._compute_reflectance(nir_corr, mn, "NIR").astype(np.float32)
+        red_ref   = self._compute_reflectance(red_corr, mr, "Red").astype(np.float32)
+        green_ref = self._compute_reflectance(green_corr, mg, "Green").astype(np.float32)
+        redge_ref = self._compute_reflectance(redge_corr, mre, "RedEdge").astype(np.float32)
+
+        # ---- Warp de reflectancias ----
+        bands_aligned = []
+        rgb = cv2.imread(rgb_path, cv2.IMREAD_UNCHANGED)
+        h_out, w_out =  rgb.shape[:2]
+
+        H_dewarp = red_file_metadata["H_dewarp"]
+        #print(type(H_dewarp))
+        H_dewarp = np.array(H_dewarp, dtype=np.float32)
+        #print("H_dewarp:", H_dewarp)
+        #print(type(H_dewarp))
+        for ref in [green_ref, red_ref, redge_ref, nir_ref]:
+            A = cv2.warpPerspective(ref, H_dewarp, (w_out, h_out), flags=cv2.INTER_LINEAR)
+            bands_aligned.append(A)
+        
+        multispec_image = np.array(bands_aligned, dtype=np.float32)
+
+        if return_vis:
+            # ---- Índices ----
+            eps = 1e-12
+
+            ndvi  = (nir_ref - red_ref) / (nir_ref + red_ref + eps)
+            gndvi = (nir_ref - green_ref) / (nir_ref + green_ref + eps)
+            ndre  = (nir_ref - redge_ref) / (nir_ref + redge_ref + eps)
+            ccci  = (ndvi - gndvi) / (ndvi + gndvi + eps)
+            savi = (1.5*(nir_ref-red_ref))/(nir_ref+red_ref+0.5+eps)
+
+            #sr = nir_ref / (red_ref + eps)
+            #msr = (sr - 1.0) / (np.sqrt(sr) + 1.0 + eps)
+
+            #L = 0.5
+            #savi = ((1 + L) * (nir_ref - red_ref)) / (nir_ref + red_ref + L + eps)
+
+            mcari = ((redge_ref - red_ref) - 0.2 * (red_ref - green_ref)) * (redge_ref / (red_ref + eps))
+            
+            # ---- Warp al plano RGB ----
+        
+            #H_dewarp, h_out, w_out = ndvi_to_drgb(rgb_path, red_path)
+            #print("ndvi mean", ndvi.mean())
+            vis = [ndvi, gndvi, ndre, ccci, savi, mcari] 
+            vis_aligned = []
+
+            for idx in vis:
+                idx = idx.clip(-1.0, 1.0)
+                aligned = cv2.warpPerspective(idx, H_dewarp, (w_out, h_out), flags=cv2.INTER_LINEAR)
+                vis_aligned.append(aligned)
+            
+            vis_aligned = np.array(vis_aligned, dtype=np.float32)
+            
+            return multispec_image, vis_aligned
+
+        return multispec_image
+
+
 class ImageSticher():
-    def __init__(self, images_data, on_progress_change = None, on_cancel = None, result_dir = "./"):
+    def __init__(self, images_data, on_progress_change = None, on_cancel = None, on_message = None, result_dir = "./"):
         self.images_data = images_data
         self.on_progress_change = on_progress_change
         self.result_dir = result_dir
         self.is_running = True
         self.on_cancel = on_cancel
+        self.on_message = on_message
     
     def process_calculate_camera_pose(self, images_data):
         for im_data in images_data:
@@ -1863,10 +1999,10 @@ class ImageSticher():
             return False
         return True
 
-    def estimate_dom_parameters(self, images_data, margin_extension = 0.1, target_resolution = None, scale_factor = 4.1):
+    def estimate_dom_parameters(self, images_data, margin_extension = 0.3, target_resolution = None, scale_factor = 4.1):
         min_gsd = np.min([m['gsd_horizontal'] for m in images_data])
         print("min_gsd:", min_gsd)
-        
+        print("target_resolution:", target_resolution)
         if target_resolution is None:
             dom_resolution = min_gsd * scale_factor
         else:
@@ -1895,7 +2031,7 @@ class ImageSticher():
         return images_data
 
     def process_detect_keypoint_descriptors_in_dom(self, images_data, dom_size, detector_keypoint = "SIFT"):
-        for i, im_data in enumerate(tqdm(images_data, desc="Keypoints Detection")):
+        for i, im_data in enumerate(images_data): #enumerate(tqdm(images_data, desc="Keypoints Detection")):
             #print("im_data:", im_data)
             im_path = im_data['relative_path']
             H_rtk = im_data['H_rtk']
@@ -1916,7 +2052,7 @@ class ImageSticher():
         all_terrain_points_dom = [im_data['terrain_points_dom'] for im_data in all_images_data]
         overlap_graph  = build_overlap_graph(all_terrain_points_dom, min_overlap=0.45)
         matches =  {}
-        for i, nbrs in tqdm(overlap_graph.items(), desc= "Matches"):
+        for i, nbrs in overlap_graph.items():#tqdm(overlap_graph.items(), desc= "Matches"):
             for j, _ in nbrs:
                 desc_i = all_images_data[i]['desc_img_dom']
                 #kp_img_dom_i = all_images_data[i]['kp_img_dom']
@@ -1930,108 +2066,6 @@ class ImageSticher():
             if not self.check_continue_procress():
                 return
         return matches
-
-    def build_linear_system(self, all_images_data, inliers, scale_factor):
-    # Inicialización de listas para COO
-        weight = 20
-        row_data = []
-        row_indices = []
-        col_indices = []
-        b_list = []
-        row_counter = 0
-        # 1. Restricciones de referencia (para imagen 0)
-        ref_values = [1, 0, 0, 0, 1, 0]  # a, b, tx, c, d, ty
-        for col_idx, val in enumerate(ref_values):
-            row_data.append(weight)
-            row_indices.append(row_counter)
-            col_indices.append(col_idx)
-            b_list.append(weight * val)
-            row_counter += 1
-        n = len(all_images_data)
-        num_params = 6 * n
-        # 2. Restricciones de similitud: a ≈ d, b ≈ -c
-        for i in range(n):
-            # T₁₁ = T₂₂
-            row_data.extend([1.0, -1.0])
-            row_indices.extend([row_counter] * 2)
-            col_indices.extend([6 * i, 6 * i + 4])
-            b_list.append(0)
-            row_counter += 1
-
-            # T₁₂ = -T₂₁  → T₁₂ + T₂₁ = 0
-            row_data.extend([1.0, 1.0])
-            row_indices.extend([row_counter] * 2)
-            col_indices.extend([6 * i + 1, 6 * i + 3])
-            b_list.append(0)
-            row_counter += 1
-
-
-        # 3. Restricciones de regularización de traslaciones
-        translation_weight = 0.1  # puedes ajustar este valor
-
-        for i in range(n):
-            # Penalizar traslación X cerca de 0
-            row_data.append(translation_weight)
-            row_indices.append(row_counter)
-            col_indices.append(6 * i + 2)  # tx
-            b_list.append(0)
-            row_counter += 1
-
-            # Penalizar traslación Y cerca de 0
-            row_data.append(translation_weight)
-            row_indices.append(row_counter)
-            col_indices.append(6 * i + 5)  # ty
-            b_list.append(0)
-            row_counter += 1
-
-        # 4. Restricciones de reproyección
-        for (i, j), match_list in tqdm(inliers.items(), desc="Matches"):
-            kp_i = all_images_data[i]['kp_img_dom']
-            kp_j = all_images_data[j]['kp_img_dom']
-            selected_matches = match_list[:60]
-
-            for m in selected_matches:
-                src_pt = np.array([*kp_i[m.queryIdx].pt, 1.0])
-                dst_pt = np.array([*kp_j[m.trainIdx].pt, 1.0])
-
-                # Escalar para evitar magnitudes grandes
-                src_pt_scaled = src_pt * scale_factor
-                dst_pt_scaled = dst_pt * scale_factor
-
-                # Ecuación para coordenada X
-                for k in range(3):
-                    row_data.extend([src_pt_scaled[k], -dst_pt_scaled[k]])
-                    row_indices.extend([row_counter, row_counter])
-                    col_indices.extend([6 * i + k, 6 * j + k])
-                b_list.append(0)
-                row_counter += 1
-
-                # Ecuación para coordenada Y
-                for k in range(3):
-                    row_data.extend([src_pt_scaled[k], -dst_pt_scaled[k]])
-                    row_indices.extend([row_counter, row_counter])
-                    col_indices.extend([6 * i + 3 + k, 6 * j + 3 + k])
-                b_list.append(0)
-                row_counter += 1
-
-        # Construcción del sistema disperso
-        A = coo_matrix((row_data, (row_indices, col_indices)), shape=(row_counter, num_params)).tocsr()
-        b = np.array(b_list)
-        return A, b
-
-    def solve_global_transforms(self, A, b, n_images, scale_factor):
-        solution = lsqr(A, b, atol=1e-6, btol=1e-6)[0]
-        # Reorganizar las transformaciones
-        global_transforms = []
-        for i in tqdm(range(n_images), desc="Images"):
-            T1 = solution[6*i:6*i+3]
-            T1[2] = T1[2] / scale_factor
-            T2 = solution[6*i+3:6*i+6]
-            T2[2] = T2[2] / scale_factor
-            M = np.vstack([T1, T2, [0, 0, 1]])
-            global_transforms.append(M)
-        
-        return global_transforms
 
     def seg_pts_transform(self, segs, H):
         print("len(segs):", len(segs))
@@ -2117,7 +2151,7 @@ class ImageSticher():
         segs_filtered = [[] for i in range(len(all_images_data))]
         
         sames = []
-        for i, nbrs in tqdm(overlap_graph.items(), desc= "Filter Trees"):
+        for i, nbrs in overlap_graph.items(): #tqdm(overlap_graph.items(), desc= "Filter Trees"):
             segs_dom_i = segs_dom[i]
             
             for k, poly_i_k in enumerate(segs_dom_i):
@@ -2150,77 +2184,6 @@ class ImageSticher():
             all_images_data[i]['segs_filtered'] = [seg for k, seg in enumerate(all_images_data[i]["segmentations"]) if k in filtered_segs_i]
             
         return segs_filtered
-
-
-    def create_mosaic(self, all_images_data, global_transforms, dom_shape):
-        blended = np.zeros((dom_shape[0], dom_shape[1], 3), dtype=np.float32)
-        total_weights = np.zeros((dom_shape[0], dom_shape[1]), dtype=np.float32)
-        
-        trees_mask = np.zeros((dom_shape[0], dom_shape[1]), dtype=np.uint8)
-        n_images = len(all_images_data)
-        
-        debug_path = f"{self.result_dir}/mosiac/debug"
-        os.makedirs(debug_path, exist_ok = True)
-
-        os.makedirs(f"{debug_path}/proyectada", exist_ok = True)
-
-        os.makedirs(f"{debug_path}/alineada", exist_ok = True)
-        
-        for index, row in tqdm(all_images_data.items(), total= n_images, desc = "Build Mosaic"):
-            print("index:", index)
-            # Image Projection to Dom
-            image = cv2.imread(row['relative_path'])
-            image_distortion = distortion_correction(image)
-            H_rtk = row['H_rtk']
-            terrain_points_dom = row['terrain_points_dom']
-            imagen_proyectada, mask = direct_project_image_to_dom(image_distortion, H_rtk, dom_shape, terrain_points_dom)
-            
-            cv2.imwrite(f"{debug_path}/proyectada/{os.path.basename(row['relative_path'])[:-4]}_proyectada.png", imagen_proyectada.astype(np.uint8))
-            
-            # Correction
-            projected_corrected = cv2.warpPerspective(imagen_proyectada, global_transforms[int(index)], (int(dom_shape[1]), int(dom_shape[0])))
-            
-            cv2.imwrite(f"{debug_path}/alineada/{os.path.basename(row['relative_path'])[:-4]}_proyectada_alineada.png", projected_corrected.astype(np.uint8))
-
-            # Trees Masks
-            #segs_dom = self.seg_pts_transform(row['segs_filtered'], H_rtk)
-            #segs_dom = self.seg_pts_transform(row['segs_filtered_dom'], global_transforms[index])
-            #segs_dom_int = [np.array(poly, dtype=np.int32) for poly in segs_dom]
-            
-            trees_mask_image = np.zeros((dom_shape[0], dom_shape[1]), dtype=np.uint8)
-            #cv2.fillPoly(trees_mask_image, segs_dom_int, 255)
-
-            #segs_dom = cv2.perspectiveTransform(segs_dom.reshape(-1, 1, 2), global_transforms[index]).reshape(-1, 2)
-
-            # Blended
-            mask = cv2.warpPerspective(mask, global_transforms[int(index)], (int(dom_shape[1]), int(dom_shape[0])))
-            weights = calculate_weights(mask, None, FusionMethod.ROBUST_DRONE)
-            
-            max_weight = np.max(weights)
-            if max_weight > 0:
-                weights = weights / max_weight
-
-            #for poly in segs_dom_int:
-            #    mask_poly = np.zeros((dom_shape[0], dom_shape[1]), dtype=np.uint8)
-            #    cv2.fillPoly(mask_poly, [poly], 1)
-            #    val_weights = weights[mask_poly == 1]
-            #    weights[mask_poly == 1] = val_weights.max()
-
-            
-            update_mask = weights > total_weights
-            blended[update_mask] = projected_corrected[update_mask]
-            total_weights = np.maximum(total_weights, weights)
-          
-            trees_mask[update_mask] = trees_mask_image[update_mask]
-            
-            self.progress_update(40 + ((int(index) * 50)// n_images))
-
-            if not self.check_continue_procress():
-                return
-
-        final_dom = blended.astype(np.uint8).copy()
-        
-        return final_dom, trees_mask
 
     def save_as_geotiff(self, image, filename, origin_x, origin_y, resolution, ref_zone_lon, transparent_bg = True, alpha = 1.0):
         """Guarda una imagen numpy como GeoTIFF georreferenciado"""
@@ -2278,9 +2241,7 @@ class ImageSticher():
         out_ds = None  # Cerrar el archivo
 
     def progress_update(self, percentaje):
-        print("update progress:", percentaje)
         if self.on_progress_change is not None:
-            print("update progress 2:", percentaje)
             self.on_progress_change(percentaje)
 
     def mask_to_polygons(self, mask, offset_x=0, offset_y=0):
@@ -2359,7 +2320,7 @@ class ImageSticher():
         blend_mask_accum = np.zeros((dom_size[0], dom_size[1]), np.float32)
         #i=0
 
-        for i, blend_mask in tqdm(enumerate(bleanding_masks ), "Sub Blending", total = len(bleanding_masks)):
+        for i, blend_mask in enumerate(bleanding_masks ): #tqdm(enumerate(bleanding_masks ), "Sub Blending", total = len(bleanding_masks)):
             
             img = images_cropped[i] #img.get() if isinstance(img, cv2.UMat) else img
             blend_mask = blend_mask.get() if isinstance(blend_mask, cv2.UMat) else blend_mask
@@ -2390,6 +2351,9 @@ class ImageSticher():
 
     def seam_bleanding_process(self, images, valid_region_masks, dom_size):
         images_cropped, bleanding_masks, bboxes_val_regions, corners = self.find_seam_bleanding(images, valid_region_masks)
+        
+        bleanding_masks = [blend_mask.get() if isinstance(blend_mask, cv2.UMat) else blend_mask for blend_mask in bleanding_masks]
+
         mosaic, _ = self.simple_bleanding(images_cropped, bleanding_masks, corners, dom_size)
         return mosaic, bleanding_masks, bboxes_val_regions, corners
     
@@ -2435,7 +2399,7 @@ class ImageSticher():
         
         i=0
         
-        for img, mask, corner, t_mask in tqdm(zip(subset_images_warped, masks, corners, subset_trees_warped), "Sub Blending", total = len(subset_images_warped)):
+        for img, mask, corner, t_mask in zip(subset_images_warped, masks, corners, subset_trees_warped): #tqdm(zip(subset_images_warped, masks, corners, subset_trees_warped), "Sub Blending", total = len(subset_images_warped)):
             img = img.get() if isinstance(img, cv2.UMat) else img
             mask = mask.get() if isinstance(mask, cv2.UMat) else mask
             h,w = img.shape[:2]
@@ -2496,24 +2460,29 @@ class ImageSticher():
         for metadata, H_init in zip(images_data, global_transforms):
             image = cv2.imread(metadata['relative_path'])
             image_distortion = undistort_with_meta(image, metadata)
+            #h, w = img.shape[:2]
+            #image_distortion = cv2.resize(image_distortion, (w//2, h//2))
+            work_scale = metadata["work_scale"]
+            img_resized = cv2.resize(image_distortion, None, fx=work_scale, fy=work_scale, interpolation=cv2.INTER_LINEAR_EXACT) 
             H_rtk = metadata['H_rtk']
+            
             H_global = H_init @ H_rtk
-            img_warped, _, valid_region_mask = direct_project_image_to_dom(image_distortion, H_global, dom_size, get_valid_region=True)
+            img_warped, _, valid_region_mask = direct_project_image_to_dom(img_resized, H_global, dom_size, get_valid_region=True)
             img_warped = img_warped.astype(np.uint8)
             valid_region_mask = valid_region_mask.astype(np.uint8)
             images_warped.append(img_warped)
             valid_region_masks.append(valid_region_mask)
         
-          
 
         print("Save Averege")
-        im_average = self.averge_images(images_warped) #np.mean(images_warped, axis=0).astype(np.uint8)
-        os.makedirs(f"{self.result_dir}/mosaic/rgb", exist_ok=True)
-        cv2.imwrite(f"{self.result_dir}/mosaic/rgb/averge_path_img_{batch_id}.png",im_average)
+        #im_average = self.averge_images(images_warped) #np.mean(images_warped, axis=0).astype(np.uint8)
+        #os.makedirs(f"{self.result_dir}/mosaic/rgb/blending", exist_ok=True)
+        #cv2.imwrite(f"{self.result_dir}/mosaic/rgb/averge_path_img_{batch_id}.png",im_average)
 
         mosaic, bleanding_masks, bboxes_val_regions, corners = self.seam_bleanding_process(images_warped, valid_region_masks, dom_size)
         
-        cv2.imwrite(f"{self.result_dir}/mosaic/rgb/blending/bleanding_patch_img_{batch_id}.png", mosaic)
+        #cv2.imwrite(f"{self.result_dir}/mosaic/rgb/blending/bleanding_patch_img_{batch_id}.png", mosaic)
+        bleanding_masks = [blend_mask.get() if isinstance(blend_mask, cv2.UMat) else blend_mask for blend_mask in bleanding_masks]
 
         return mosaic, bleanding_masks, bboxes_val_regions, corners
 
@@ -2639,7 +2608,7 @@ class ImageSticher():
             mosaic_patch, bleanding_masks, bboxes_val_regions, corners = self.generate_mosaic_rgb_batch(metadata_rgb_images[start:end], 
                                                                                                         global_transforms[start:end], 
                                                                                                         dom_size,
-                                                                                                        i)
+                                                                                                          i)
             
             valid_region = (mosaic_patch.sum(axis=2) > 0).astype(np.uint8) * 255
             valid_region = valid_region.astype(np.uint8)
@@ -2661,8 +2630,8 @@ class ImageSticher():
 
         if len(images_warped) > 1:
             #im_average = np.mean(images_warped, axis=0).astype(np.uint8)
-            im_average = self.averge_images(images_warped)
-            cv2.imwrite(f"{self.result_dir}/mosaic/rgb/averge_path_img_second_level.png",im_average)
+            #im_average = self.averge_images(images_warped)
+            #cv2.imwrite(f"{self.result_dir}/mosaic/rgb/averge_path_img_second_level.png",im_average)
             final_mosaic, bleanding_masks, bboxes_val_regions, corners = self.seam_bleanding_process(images_warped, valid_region_masks_warped, dom_size)
 
             ## Bleanding Ndvi images
@@ -2864,6 +2833,7 @@ class ImageSticher():
             img_path = image_metadata['relative_path']
             basename = os.path.basename(img_path)[:-4]
             mask_path = f"{dir_base}/results/unique_trees_detections/masks/{basename}_tree_{x_min}_{y_min}.png"
+            
             unique_trees_results.append({
                 "id_img": im_idx,
                 "tree_idx": tree_id,
@@ -2885,50 +2855,6 @@ class ImageSticher():
             json.dump(unique_trees_info, f, indent=2)
 
         return unique_trees_results
-
-    def apply_diagnosis_process(self, trees_detections, all_images_metadada_dict):
-        clases = ["saludable","deficiencia"]
-        # calculate_average_ndvi(self, corner, tree_mask, img_path, all_files_metadata)
-        # magic_function = lambda mask, corner, img_path: (random.choices([0, 1], weights=[0.7, 0.3])[0], self.calculate_average_ndvi(corner, mask, img_path, all_images_metadada_dict))
-        trees_diagnosis_results = copy.deepcopy(trees_detections)
-        
-        for i in range(len(trees_detections)):
-            detection_result = trees_detections[i]
-            img_path = detection_result["img_path"]
-            mask_cropped_path = detection_result["mask_cropped_path"]
-            mask = cv2.imread(mask_cropped_path)
-            mask = mask.astype(np.uint8)
-            
-            if mask.ndim == 3 and mask.shape[-1] > 1:
-                mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
-
-            if mask.shape[-1] == 1:
-                mask = mask.squeeze()
-
-            corner = detection_result["corner"]
-            #class_id, avg_ndvi = magic_function(mask, corner, img_path)
-
-            prediction, hypercube = NitrogenDefClassifer.build_cube_and_predict(
-                rgb_path=img_path,
-                mask_tree= mask,
-                corner = corner,
-                all_metadata_images=all_images_metadada_dict
-            )
-            print("prediction:", prediction)
-            print("hypercube:", hypercube.shape)
-            ndvi = hypercube[4,:,:]
-            avg_ndvi = ndvi[ndvi >= 0.3].mean()
-            mcari_avg = hypercube[-1,:,:][ndvi >= 0.3].mean()
-
-            print("avg_ndvi:", avg_ndvi)
-            print("mcari_avg:", mcari_avg)
-            class_name = clases[prediction]
-
-            trees_diagnosis_results[i]["diagnosis_class"] = class_name
-            trees_diagnosis_results[i]["avg_ndvi"] = float(avg_ndvi)
-            trees_diagnosis_results[i]["mcari_avg"] = float(mcari_avg)
-        
-        return trees_diagnosis_results
 
     def save_trees_masks_mosaic(self, 
                                 H_abs_global, 
@@ -3202,8 +3128,1244 @@ class ImageSticher():
 
         with open(f"{dir_base}/mosaic/trees/trees_results.json", "w") as fp:
             json.dump(final_trees_results, fp, indent=4) 
+    
+    def init_dom_parameters(self, images_data, target_resolution = None):
+        for im_data in images_data: #tqdm(images_data, desc="Camare Pose"):
+            im_data['camera_pose'] = calculate_camera_pose(im_data)
+
+        for im_data in images_data: #tqdm(images_data,"Terrain Points"):
+                im_data['terrain_points'] = corners_to_terrain_points(im_data)
+
+        dom_bounds, dom_resolution = self.estimate_dom_parameters(images_data, scale_factor = 16.4, target_resolution = target_resolution)
+        print("dom_resolution:", dom_resolution)
+        width_m = dom_bounds[1] - dom_bounds[0]
+        height_m = dom_bounds[3] - dom_bounds[2]
+        
+        print("width_m:", width_m)
+        print("height_m:", height_m)
+        width_px = int(width_m / dom_resolution)
+        height_px = int(height_m / dom_resolution)
+        dom_size = (height_px, width_px)
+        
+        print("dom_size:", dom_resolution)
+        return dom_size, dom_bounds, dom_resolution
+
+
+    def init_transform_to_dom(self, images_data, dom_bounds, dom_resolution):
+        for im_data in images_data:  #tqdm(images_data, desc="Terraim Points Dom"):
+            terrain_points_dom, H = project_corners_to_dom((im_data["h_ws"], im_data["w_ws"]) , dom_bounds, dom_resolution, im_data['terrain_points'])
+            im_data['terrain_points_dom'] = terrain_points_dom
+            im_data['H_rtk'] = H
+        
+        return images_data
+
+
+    def get_anchors_ids(self,  adj_graph, n_images):
+        visited = [False] * n_images
+        visited[0] = True
+        heap = []
+        anchors_ids = [0]
+        
+        for (v, H, mask, pts_u, pts_v) in adj_graph[0]:
+             heapq.heappush(heap, (0, v, H, mask, pts_u, pts_v))
+
+        step = 0
+        step_push = 20
+        while heap:
+            u,v,H,mask,pts_u,pts_v = heapq.heappop(heap)
+            if visited[v]:
+                continue
+
+            visited[v] = True
+            
+            for (to, H2, mask2, pts_a, pts_b) in adj_graph[v]:
+                if not visited[to]:
+                    heapq.heappush(heap, (v, to, H2, mask2, pts_a, pts_b))
+            
+            step +=1
+            if step >= step_push:
+                anchors_ids.append(v)
+                step = 0 
+        
+        return anchors_ids
+
+    def refine_homographies2(self, adj_graph, n_images):
+        H_abs = [None for _ in range(n_images)]
+        visited = [False] * n_images
+        visited[0] = True
+        
+        heap = []
+        anchors_ids = self.get_anchors_ids(adj_graph, n_images)
+        print()
+        print("anchors_ids:\n", self.get_anchors_ids(adj_graph, n_images))
+        print()
+        for anc_id in anchors_ids:
+            visited[anc_id] = True
+            H_abs[anc_id] = np.eye(3)
+            for (v, H, mask, pts_u, pts_v) in adj_graph[anc_id]:
+             heapq.heappush(heap, (anc_id, v, H, mask, pts_u, pts_v))
+
+       
+        while heap:
+            u,v,H,mask,pts_u,pts_v = heapq.heappop(heap)
+            if visited[v]:
+                continue
+
+            visited[v] = True
+            
+            src_points = []
+            dts_points = []
+            
+            for (to, H2, mask2, pts_a, pts_b) in adj_graph[v]:
+                if not visited[to]:
+                    heapq.heappush(heap, (v, to, H2, mask2, pts_a, pts_b))
+                elif to!=u:
+                    pts_j = cv2.perspectiveTransform(pts_b.reshape(-1, 1, 2), H_abs[to])
+                    src_points.extend(pts_a[mask2])
+                    dts_points.extend(pts_j[mask2])
+            if len(src_points)> 0:
+                H_g, inliers = cv2.estimateAffine2D(np.array(src_points).reshape(-1, 1, 2), np.array(dts_points).reshape(-1, 1, 2), method=cv2.RANSAC, ransacReprojThreshold= 4.0) 
+                H_g = np.vstack([H_g, [0, 0, 1]])
+                inliers = inliers.ravel().astype(bool)
+                #print("Mask:", mask)
+                num_inliers = inliers.sum()
+            
+                print("num_inliers:", num_inliers)
+                
+                H_abs[v] = H_g
+            else:
+                H_abs[v] = H
+        
+        return H_abs
+    
+    def refine_homographies(self, adj_graph, n_images, adj_graph_low):
+        H_abs = [None for _ in range(n_images)]
+        visited = [False] * n_images
+        visited[0] = True
+        H_abs[0] = np.eye(3)
+
+        import heapq
+        heap = []
+
+        for (v, H, mask, pts_u, pts_v) in adj_graph[0]:
+            heapq.heappush(heap, (0, v, H, mask, pts_u, pts_v))
+
+        while heap:
+            u,v,H,mask,pts_u,pts_v = heapq.heappop(heap)
+            if visited[v]:
+                continue
+
+            visited[v] = True
+            
+            src_points = []
+            dts_points = []
+            
+            for (to, H2, mask2, pts_a, pts_b) in adj_graph[v]:
+                if not visited[to]:
+                    heapq.heappush(heap, (v, to, H2, mask2, pts_a, pts_b))
+                elif to!=u:
+                    pts_j = cv2.perspectiveTransform(pts_b.reshape(-1, 1, 2), H_abs[to])
+                    src_points.extend(pts_a[mask2])
+                    dts_points.extend(pts_j[mask2])
+            if len(src_points)> 0:
+                H_g, inliers = cv2.estimateAffine2D(np.array(src_points).reshape(-1, 1, 2), np.array(dts_points).reshape(-1, 1, 2), method=cv2.RANSAC, ransacReprojThreshold= 4.0) 
+                H_g = np.vstack([H_g, [0, 0, 1]])
+                inliers = inliers.ravel().astype(bool)
+                #print("Mask:", mask)
+                num_inliers = inliers.sum()
+            
+                print("num_inliers:", num_inliers)
+                
+                H_abs[v] = H_g
+            else:
+                H_abs[v] = H
         
 
+        ### Verfificar None matrix
+        disconected_points = []
+        for i in range(n_images):
+            if H_abs[i] is None:
+                print("None Matrix:", i)
+                disconected_points.append(i)
+                src_points = []
+                dts_points = []
+                print("adj_graph[i] \n:", adj_graph[i])
+                adj_edges = adj_graph[i]
+                if len(adj_edges) == 0:
+                    adj_edges = adj_graph_low[i]
+                    print("Uasando low edges\n")
+                    print(f"adj_graph_low[{i}]", len(adj_graph_low[i]))
+                for (to, _, mask2, pts_a, pts_b) in adj_edges:
+                    if not visited[to]:
+                       continue
+                    else:
+                        pts_j = cv2.perspectiveTransform(pts_b.reshape(-1, 1, 2), H_abs[to])
+                        src_points.extend(pts_a[mask2])
+                        dts_points.extend(pts_j[mask2])
+                
+                if len(src_points)> 0:
+                    H_g, inliers = cv2.estimateAffine2D(np.array(src_points).reshape(-1, 1, 2), np.array(dts_points).reshape(-1, 1, 2), method=cv2.RANSAC, ransacReprojThreshold= 4.0) 
+                    H_g = np.vstack([H_g, [0, 0, 1]])
+                    inliers = inliers.ravel().astype(bool)
+                    #print("Mask:", mask)
+                    num_inliers = inliers.sum()
+                
+                    print("num_inliers:", num_inliers)
+                    H_abs[i] = H_g
+                else:
+                    H_abs[i] = np.eye(3)
+                print(f"nuevo H_abs[{i}]:\n", H_abs[i])
+        return H_abs, disconected_points
+    
+
+
+    def _resize_detection(self, bboxes, segmentations, src_size, tgt_size):
+        scale_factor_h = tgt_size[0] / src_size[0]
+        scale_factor_w = tgt_size[1] / src_size[1]
+
+
+        bboxes_reshaped = [[np.clip(box[0] * scale_factor_w, 0, tgt_size[1]),
+                np.clip(box[1] * scale_factor_h, 0, tgt_size[0]),
+                np.clip(box[2] * scale_factor_w, 0, tgt_size[1]),
+                np.clip(box[3] * scale_factor_h, 0, tgt_size[0])
+                ] for box in bboxes]
+        
+        segmentations_reshaped = []
+        
+        for seg in segmentations:
+            pts = np.array(seg).copy().reshape(-1, 2)
+            pts[:, 0] = np.clip(pts[:, 0] * scale_factor_w, 0, tgt_size[1])
+            pts[:, 1] = np.clip(pts[:, 1] * scale_factor_h, 0, tgt_size[0])
+            
+            segmentations_reshaped.append(pts)
+
+        return bboxes_reshaped, segmentations_reshaped, 
+
+    def read_trees_detection(self, detect_path, im_shape):
+        with open(detect_path, "r") as f:
+            detecctions = json.load(f)
+        
+        detecctions = detecctions["detecctions"]
+        #h, w = im_shape
+        bboxes, segmentations = self._resize_detection(detecctions["bboxes"], 
+                                                      detecctions['segmentations'],
+                                                      src_size = (1,1),
+                                                      tgt_size = im_shape)
+        # bboxes = detecctions["bboxes"]
+        # bboxes = [[np.clip(box[0] * w, 0, w),
+        #         np.clip(box[1] * h, 0, h),
+        #         np.clip(box[2] * w, 0, w),
+        #         np.clip(box[3] * h, 0, h)
+        #         ] for box in bboxes]
+        
+        # segmentations = []
+        
+        # for seg in detecctions['segmentations']:
+        #     pts = np.array(seg)
+        #     pts[:, 0] = np.clip(pts[:, 0] * w, 0, w)
+        #     pts[:, 1] = np.clip(pts[:, 1] * h, 0, h)
+        #     segmentations.append(pts)
+
+        #segmentations = detecctions['segmentations']
+        mask_trees = np.zeros(im_shape, dtype=np.uint8)
+        contours = [np.array(seg, dtype=np.int32).reshape((-1,1,2)) for seg in segmentations]
+        mask_trees = cv2.drawContours(mask_trees, contours, -1, 255, -1)
+        return mask_trees, segmentations, bboxes
+
+    def read_and_project_detections(self, metadata_rgb_images, H_abs):
+        all_segmentations = []
+        all_bboxes = []
+        all_dist_to_centers = []
+
+        for i in range(len(metadata_rgb_images)): #tqdm(range(len(metadata_rgb_images)), desc="Filtered Detects"):
+            self.progress_update(int(10 * (i / len(metadata_rgb_images))) + 40)
+            if not self.check_continue_procress():
+                return
+            meta = metadata_rgb_images[i]
+            detect_path = meta['detections_path']
+
+            im_shape = (meta["h_ws"], meta["w_ws"])
+            mask_trees, segmentations, bboxes = self.read_trees_detection(detect_path, im_shape)
+            filtered_segmentations, mask_valid = posprocessing_segmentations(segmentations, im_shape, hu1_threshold = 0.70)
+
+            filtered_bboxes = [bboxes[j] for j, valid in enumerate(mask_valid) if valid]
+            
+            all_segmentations.append(filtered_segmentations)
+            all_bboxes.append(filtered_bboxes)
+
+            dist_to_centers = [distancia_centroide_imagen(poly, img_shape = im_shape) for poly in filtered_segmentations]
+            all_dist_to_centers.append(dist_to_centers)
+
+        all_segmentations_in_dom = []
+        all_bboxes_in_dom = []
+
+        for i, im_data in enumerate(metadata_rgb_images): #tqdm(enumerate(metadata_rgb_images), desc="Detects to Dom"):
+            H_rtk_i = im_data['H_rtk']
+            H_abs_i = H_abs[i]
+            H_global_i = H_abs_i @ H_rtk_i
+            filtered_segmentations_i = all_segmentations[i]   
+            
+            segs_in_dom_i = seg_pts_to_dom(filtered_segmentations_i, H_global_i) #[seg_pts_to_dom(seg, H_global) for seg in segmentations]
+            bboxes_in_dom_i = [bbox(np.round(np.array(pts)).astype(np.int32)) for pts in segs_in_dom_i]
+            
+            all_segmentations_in_dom.append(segs_in_dom_i)
+            all_bboxes_in_dom.append(bboxes_in_dom_i)
+        
+        detections_in_dom = (all_segmentations_in_dom, all_bboxes_in_dom)
+        detections = (all_segmentations, all_bboxes)
+
+        return detections_in_dom, detections 
+
+    def segs_blending_areas(self, segs_dom, first_level_bleanding_masks, first_level_corners, detect_to_imgid):
+        segs_areas_blended = []
+        for i, seg in enumerate(segs_dom):
+            img_id = detect_to_imgid[i]
+            ## Apply First level blending
+            blend_mask = first_level_bleanding_masks[img_id]
+            blend_mask = blend_mask.get() if isinstance(blend_mask, cv2.UMat) else blend_mask
+            h_b, w_b = blend_mask.shape
+            
+            corner = first_level_corners[img_id]
+            
+            seg_cuted = seg.copy().reshape(-1,2)
+            seg_cuted[:, 0] = seg_cuted[:, 0]  - corner[0]
+            seg_cuted[:, 1] = seg_cuted[:, 1]  - corner[1]
+            
+            seg_cuted = np.array(seg_cuted, dtype=np.int32).reshape(-1, 1, 2)
+            mask_seg = np.zeros((h_b, w_b), dtype = np.uint8)
+
+            cv2.drawContours(mask_seg, [seg_cuted], -1, 255, thickness=-1)
+
+            mask_seg = (mask_seg * 255).astype(np.uint8) if mask_seg.max() == 1 else mask_seg
+            
+
+            intersection = cv2.bitwise_and(mask_seg, blend_mask)
+            
+            area = np.count_nonzero(intersection)
+            segs_areas_blended.append(area)
+        return segs_areas_blended
+
+    def compute_iou(self, box, boxes):
+        """
+        box: (4,) -> [x1, y1, x2, y2]
+        boxes: (N, 4)
+        """
+        x1 = np.maximum(box[0], boxes[:, 0])
+        y1 = np.maximum(box[1], boxes[:, 1])
+        x2 = np.minimum(box[2], boxes[:, 2])
+        y2 = np.minimum(box[3], boxes[:, 3])
+
+        inter_w = np.maximum(0, x2 - x1)
+        inter_h = np.maximum(0, y2 - y1)
+        intersection = inter_w * inter_h
+
+        box_area = (box[2] - box[0]) * (box[3] - box[1])
+        boxes_area = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+
+        union = box_area + boxes_area - intersection
+
+        iou = intersection / (union + 1e-6)
+        return iou
+
+    def postprocess_detections(self, boxes, segs, blending_masks, scores, iou_threshold = 0.5):
+        # algoritmo NMS adaptado
+        indices = np.argsort(scores)[::-1]
+        keep = []
+        keep_segs = []
+        boxes = np.array(boxes)
+        blend_masks, corners_blend = blending_masks
+        while len(indices) > 0:
+            current = indices[0]
+
+            keep.append(current)
+
+            if len(indices) == 1:
+                keep_segs.append(segs[current])
+                break
+            
+            rest = indices[1:]
+            ious = self.compute_iou(boxes[current], boxes[rest])
+            # obtener los que tienes IOu mayor o igual al umbral  
+            sames = np.where(ious >= iou_threshold)[0]
+            id_sames_detec = indices[sames + 1]
+            same_segs = [segs[current]] + [segs[i] for i in id_sames_detec]
+            
+            masks = [blend_masks[current]] + [blend_masks[i] for i in id_sames_detec]
+            coners = [corners_blend[current]] + [corners_blend[i] for i in id_sames_detec]
+    
+            coners = np.array(coners).astype(np.int32)
+            x_min, y_min = coners.min(axis=0)
+            x_max, y_max = coners.max(axis=0)
+        
+            sizes = np.array([m.shape[:2] for m in masks])
+            h_max, w_max = sizes.max(axis=0)
+            h_max = h_max + y_max - y_min + 1
+            w_max = w_max + x_max - x_min + 1
+            corners_b  = np.array(coners).reshape(-1, 2).astype(np.int32) - np.array([x_min, y_min], np.int32)
+            
+
+            mask_segs = np.zeros((h_max, w_max), dtype=np.uint8)
+            mask_best_seg = np.zeros((h_max, w_max), dtype=np.uint8)
+            segs_alieg = []
+            for i, seg in enumerate(same_segs):
+                seg_c = seg.copy().reshape(-1, 2)
+                seg_c[:, 0] = seg_c[:, 0] - float(x_min)
+                seg_c[:, 1] = seg_c[:, 1] - float(y_min)
+
+                segs_alieg.append(seg_c)
+                cv2.drawContours(mask_segs, [np.array(seg_c, dtype=np.int32).reshape((-1,1,2))], -1, 255, -1)
+
+                if i == 0:
+                    cv2.drawContours(mask_best_seg, [np.array(seg_c, dtype=np.int32).reshape((-1,1,2))], -1, 255, -1)
+            
+            mask_segs_f = np.zeros_like(mask_segs, dtype= mask_segs.dtype)
+            mask_inter = np.zeros_like(mask_segs, dtype= mask_segs.dtype)
+            
+            for i, corner, blend_mask in zip(range(len(corners_b)), corners_b, masks):
+                x_cor, y_cor = corner
+                
+                mask_current = np.zeros_like(mask_segs_f, dtype= mask_segs.dtype)
+                cv2.drawContours(mask_current, [np.array(segs_alieg[i], dtype=np.int32).reshape((-1,1,2))], -1, 255, -1)
+                
+                h_m, w_m = blend_mask.shape[:2]
+                roi = mask_current[y_cor : y_cor + h_m, x_cor : x_cor + w_m]
+                h_roi, w_roi = roi.shape[:2]
+            
+                blend_mask_adjusted = blend_mask[:h_roi, :w_roi]
+                
+    
+                res = cv2.bitwise_and(roi, blend_mask_adjusted)
+
+                if i == 0:
+                    roi_0 = mask_best_seg[y_cor : y_cor + h_m, x_cor : x_cor + w_m]
+                    inter = cv2.bitwise_and(roi_0, ~blend_mask_adjusted)
+
+                    mask_inter[y_cor : y_cor + h_roi, x_cor : x_cor + w_roi] = inter
+                else:
+                    roi_inter = mask_inter[y_cor : y_cor + h_roi, x_cor : x_cor + w_roi]
+                    mask_inter[y_cor : y_cor + h_roi, x_cor : x_cor + w_roi] = cv2.bitwise_and(roi_inter, ~blend_mask_adjusted)
+
+                roi_f = mask_segs_f[y_cor : y_cor + h_roi, x_cor : x_cor + w_roi]
+                mask_segs_f[y_cor : y_cor + h_roi, x_cor : x_cor + w_roi]  = cv2.bitwise_or(roi_f, res)
+
+
+            mask_segs_f = cv2.bitwise_or(mask_segs_f, mask_inter)
+
+            contours_new, _ = cv2.findContours(mask_segs_f, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            cnt_largest = max(contours_new, key=cv2.contourArea)
+            cnt_largest[:,:, 0] = cnt_largest[:,:, 0] + x_min
+            cnt_largest[:,:, 1] = cnt_largest[:,:, 1] + y_min
+            keep_segs.append(cnt_largest)
+            #ble
+        
+            # mantener solo los que tienen IoU menor al threshold
+            filtered = np.where(ious < iou_threshold)[0]
+            indices = indices[filtered + 1]
+        return keep, keep_segs
+
+    def create_global_mosaic_rgb_and_detects(
+            self,
+            images_data,
+            H_abs,
+            dom_size,
+            batch_size = 300,
+            segmentations_in_dom = [],
+            bboxes_in_dom = [] 
+            ):
+    
+        detect_to_imgid = [i for i, bboxes in enumerate(bboxes_in_dom) for _ in range(len(bboxes)) if len(bboxes) > 0]
+        
+        boxes_dom = [box for bboxes in bboxes_in_dom for box in bboxes  if len(bboxes) > 0]
+        print("len boxes_dom:", len(boxes_dom))
+
+        segs_dom = [seg for segs in segmentations_in_dom for seg in segs  if len(segs) > 0]
+        print("len segs_dom:", len(segs_dom))
+        n_images = len(images_data)
+        
+        # Warped Images
+        images_warped = []
+        valid_region_masks_warped = []
+
+        # Batch Blending Masl
+        first_level_bleanding_masks = []
+        first_level_corners = []
+
+        selected_detect_indexes = []
+        segs_blended = []
+        bboxes_blended = []
+        detects_ids_blended = []
+
+        window_size = batch_size
+        stride_size = batch_size // 2
+        
+        n_steps = max(1, math.ceil((n_images - window_size) / stride_size) + 1)
+
+        print("n_steps:", n_steps)
+
+        for i in range(n_steps):
+            print()
+            print("Step:", i, " ......")
+            print()
+            start, end = stride_size * i, min(stride_size * i + window_size, n_images)
+            mosaic_patch, bleanding_masks, bboxes_val_regions, corners = self.generate_mosaic_rgb_batch(images_data[start:end], 
+                                                                                            H_abs[start:end], 
+                                                                                            dom_size,
+                                                                                            i)
+            
+            detects_id_batch_i = [i for i in range(len(boxes_dom)) if start <= detect_to_imgid[i] and detect_to_imgid[i] < end]
+            
+            detect_to_imgid_i = [detect_to_imgid[i] - start for i in detects_id_batch_i]
+            
+            boxes_dom_i =  [boxes_dom[i] for i in detects_id_batch_i]
+            segs_dom_i =  [segs_dom[i] for i in detects_id_batch_i]
+
+            segs_blend_scores = self.segs_blending_areas(segs_dom_i, first_level_bleanding_masks = bleanding_masks, first_level_corners = corners, detect_to_imgid = detect_to_imgid_i)
+
+            
+            det_blending_masks = [bleanding_masks[detect_to_imgid_i[i]] for i in range(len(boxes_dom_i))]
+            det_blending_corners = [corners[detect_to_imgid_i[i]] for i in range(len(boxes_dom_i)) ]
+
+            selected_indexes_i, segs_blended_i = self.postprocess_detections(boxes_dom_i, segs_dom_i, [det_blending_masks, det_blending_corners], segs_blend_scores, iou_threshold = 0.20)
+            
+            print(segs_blended_i[0].shape)
+            
+            bboxes_blended_i = [bbox(np.array(seg).astype(np.int32).reshape(-1,2)) for seg in segs_blended_i]
+
+            
+            selected_detect_indexes.append(selected_indexes_i)
+            segs_blended.append(segs_blended_i)
+            bboxes_blended.append(bboxes_blended_i)
+            detects_ids_blended.append(detects_id_batch_i)
+
+            print("segs_blend_scores:", len(segs_blend_scores))
+
+            valid_region = (mosaic_patch.sum(axis=2) > 0).astype(np.uint8) * 255
+            valid_region = valid_region.astype(np.uint8)
+
+
+            images_warped.append(mosaic_patch)
+            valid_region_masks_warped.append(valid_region)
+
+            first_level_bleanding_masks.extend(bleanding_masks)
+            #first_level_bboxes_val_regions.extend(bboxes_val_regions)
+            first_level_corners.extend(corners)
+
+        if len(images_warped) > 1:
+            #im_average = np.mean(images_warped, axis=0).astype(np.uint8)
+            #im_average = self.averge_images(images_warped)
+            #cv2.imwrite(f"{self.result_dir}/mosaic/rgb/averge_path_img_second_level.png",im_average)
+            final_mosaic, bleanding_masks, bboxes_val_regions, corners = self.seam_bleanding_process(images_warped, valid_region_masks_warped, dom_size)
+            
+            # detects_ids_blended
+            # selected_detect_indexes
+            detects_ids_dom_blended = [detects_id[index] for detects_id, indexes in zip(detects_ids_blended, selected_detect_indexes) for index in indexes]
+            segs_dom_blended = [seg for segs in segs_blended for seg in segs ]
+            bboxes_dom_blended = [box for bboxes in bboxes_blended for box in bboxes ]
+            detect_to_imgid_blended = [i for i, bboxes in enumerate(bboxes_blended) for _ in range(len(bboxes)) if len(bboxes) > 0]
+
+            print("segs_dom_blended:", segs_dom_blended[0].shape)
+            segs_blend_scores = self.segs_blending_areas(segs_dom_blended, first_level_bleanding_masks = bleanding_masks,  first_level_corners = corners, detect_to_imgid = detect_to_imgid_blended)
+            
+            det_blending_masks = [bleanding_masks[detect_to_imgid_blended[i]] for i in range(len(bboxes_dom_blended))]
+            det_blending_corners = [corners[detect_to_imgid_blended[i]] for i in range(len(bboxes_dom_blended)) ]
+
+            selected_indexes_blended, segs_blended_filtered = self.postprocess_detections(bboxes_dom_blended, segs_dom_blended, [det_blending_masks, det_blending_corners], segs_blend_scores, iou_threshold = 0.35)
+
+            
+            final_segs_dom  = segs_blended_filtered#[segs_dom[idx] for idx in selected_indices]
+            final_boxes_dom = np.array(bboxes_dom_blended)[selected_indexes_blended]
+            #img_detects_dom = draw_detections(final_mosaic, final_segs_dom, bboxes=final_boxes_dom, alpha=0.45)
+
+            selected_indexes_dom = [detects_ids_dom_blended[index] for index in selected_indexes_blended]
+            #cv2.imwrite(f"{self.result_dir}/mosaic/rgb/detects_mosaic.png", img_detects_dom)
+
+        else:
+            final_mosaic = images_warped[0]
+            final_segs_dom = segs_blended[0]
+            final_boxes_dom = np.array(bboxes_blended[0])
+            selected_indexes_dom = selected_detect_indexes[0]
+
+            #img_detects_dom = draw_detections(final_mosaic, final_segs_dom, bboxes=final_boxes_dom, alpha=0.45)
+
+            #cv2.imwrite(f"{self.result_dir}/mosaic/rgb/detects_mosaic.png", img_detects_dom)
+
+
+        return final_mosaic, final_segs_dom, final_boxes_dom, selected_indexes_dom, detect_to_imgid
+
+    def _get_name_file(self, name_file = None, prefix_name = None,):
+        
+        if name_file is None:
+            name_file = datetime.now().strftime("%Y%m%d_%H%M%S") + ".tif"
+        
+        if prefix_name is not None:
+            name_file = prefix_name + ".tif"
+        else:
+            name_file = prefix_name + "_" + name_file if prefix_name else name_file
+        
+        return name_file
+
+    def calcular_centro_promedio(self, puntos):
+        """
+        Calcula el centro geométrico simple promediando los vértices.
+        Útil para rectángulos, bounding boxes regulares o aproximaciones rápidas.
+        
+        :param puntos: Lista de tuplas o array de coordenadas [(x1, y1), (x2, y2), ...]
+        :return: Tupla con (Cx, Cy)
+        """
+        pts = np.array(puntos)
+        cx = np.mean(pts[:, 0])
+        cy = np.mean(pts[:, 1])
+        return cx, cy
+    
+    
+    def extraer_esquinas_opencv(self, lista_puntos, disconected_points):
+        # 1. Convertir la lista normal a un array de NumPy que OpenCV pueda entender
+        puntos_np = np.array(lista_puntos, dtype=np.float32)
+
+        # 2. Calcular el rectángulo de área mínima (encuentra la rotación automáticamente)
+        rect = cv2.minAreaRect(puntos_np)
+
+        # 3. Obtener las coordenadas (x, y) de las 4 esquinas teóricas de ese rectángulo
+        esquinas_teoricas = cv2.boxPoints(rect)
+
+        # 4. Buscar el punto real más cercano a cada esquina teórica
+        esquinas_reales = []
+
+        if len(disconected_points) > 0:
+            puntos_np[disconected_points, :] = [float('inf'), float('inf')]
+        
+        for tx, ty in esquinas_teoricas:
+            # Calculamos la distancia de todos los puntos a esta esquina teórica
+            distancias = np.linalg.norm(puntos_np - [tx, ty], axis=1)
+            
+            # Obtenemos el índice del punto con la distancia mínima
+            indice_mas_cercano = np.argmin(distancias)
+            
+            # Guardamos el punto real
+            esquinas_reales.append(indice_mas_cercano)
+
+        # Devuelve una lista con los 4 extremos reales de tu parcela
+        return esquinas_reales
+
+    def process_features_extraction(self, images_data, work_megapix = 0.6):
+        for idx, im_data in enumerate(images_data): #tqdm(images_data, desc="Keypoints Detection"):
+            
+            self.progress_update(int(10 * (idx / len(images_data))))
+            if not self.check_continue_procress():
+                return
+            im_path = im_data['relative_path']
+            img = cv2.imread(im_path)
+            img_undistorned = undistort_with_meta(img, im_data) #distortion_correction(img)
+            
+            work_scale = min(1.0, np.sqrt(work_megapix * 1e6 / (img_undistorned.shape[0] * img_undistorned.shape[1])))
+            img_resized = cv2.resize(img_undistorned, None, fx=work_scale, fy=work_scale, interpolation=cv2.INTER_LINEAR_EXACT) 
+
+            kp_img, desc_img, _ = detect_keypoint_descriptors(img_resized, "SIFT", draw_keypoints = False, nfeatures = 50000)
+            im_data['kp_img'] = kp_img
+            im_data['desc_img'] = desc_img
+            
+            h_ws, w_ws = img_resized.shape[:2]
+
+            im_data['w_ws'] = w_ws
+            im_data["h_ws"] = h_ws
+            im_data["work_scale"] = work_scale
+        
+        return images_data
+
+    def estimate_pairwase_homographies(self, overlap_graph, all_images_data, transform_type = "homography", ransac_thresh = 4.0, min_matches_per_edges = 20):
+        edges = []
+        edges_low = []
+        n = len(all_images_data)
+        for i, neighboards in overlap_graph.items(): #tqdm(overlap_graph.items(),"Pairwase Edges"):
+            
+            self.progress_update(int(18 * (i / len(overlap_graph))) + 12)
+            if not self.check_continue_procress():
+                return edges, edges_low
+            
+            neighboards_ids = [neigh[0] for neigh in neighboards]
+            print(f"neighboards_ids ({i}):", neighboards_ids)
+            for j in range(i+1, n):
+                if j not in neighboards_ids:
+                    continue
+                H_rtk_i = all_images_data[i]['H_rtk'] 
+                desc_i = all_images_data[i]['desc_img']
+                kp_img_i = all_images_data[i]['kp_img']
+
+                desc_j = all_images_data[j]['desc_img']
+                kp_img_j = all_images_data[j]['kp_img']
+                H_rtk_j = all_images_data[j]['H_rtk'] 
+                
+                good_matches = match_keypoints_with_flann(desc_i, desc_j, detector_type="SIFT")
+                print(f"good_matches j:({j}):", len(good_matches))
+                if len(good_matches) < 5:
+                    print("Pocos good matches")
+                    continue
+                
+                pts_i = np.array([kp_img_i[m.queryIdx].pt for m in good_matches], dtype=np.float32)
+                pts_j = np.array([kp_img_j[m.trainIdx].pt for m in good_matches], dtype=np.float32)
+                
+                pts_i_trans = cv2.perspectiveTransform(pts_i.reshape(-1, 1, 2), H_rtk_i)
+                pts_j_trans = cv2.perspectiveTransform(pts_j.reshape(-1, 1, 2), H_rtk_j)
+
+                if transform_type == 'homography': # 8 grados de libertad
+                    H, mask = cv2.findHomography(pts_j_trans, pts_i_trans, cv2.RANSAC, ransac_thresh)
+                elif transform_type == 'similarity': # 4 grados de libertad
+                    H, mask = cv2.estimateAffinePartial2D(pts_j_trans, pts_i_trans, method=cv2.RANSAC, ransacReprojThreshold= ransac_thresh)
+                    H = np.vstack([H, [0, 0, 1]])
+                elif transform_type == 'affine':    # 6 grados de libertad
+                    H, mask = cv2.estimateAffine2D(pts_j_trans, pts_i_trans, method=cv2.RANSAC, ransacReprojThreshold= ransac_thresh)
+                    if H is None or H.shape != (2, 3):
+                        print(f"⚠️ Transformación inválida entre imágenes {i} y {j}, se salta")
+                        continue
+                        #H = np.eye(3, dtype=np.float32) 
+                    H = np.vstack([H, [0, 0, 1]])
+                else:
+                    H, mask = cv2.findHomography(pts_j_trans, pts_i_trans, cv2.RANSAC, ransac_thresh) 
+                
+                if H is None:
+                    print(f"Homografies H none ({i}, {j}):", inliers)
+                    continue
+                
+                mask = mask.ravel().astype(bool)
+                #print("Mask:", mask)
+                inliers = mask.sum()
+                #print(f"inliers ({i}, {j}):", inliers)
+                if inliers >= min_matches_per_edges:  # Mínimo para estimar transformación
+                    print(f"noo falta inliers ({i}, {j}):", inliers)
+                    edges.append((i, j, H, mask, inliers, pts_i_trans, pts_j_trans))
+                else:
+                    edges_low.append((i, j, H, mask, inliers, pts_i_trans, pts_j_trans))
+                    print(f"falta inliers ({i}, {j}):", inliers)
+        
+        return edges, edges_low
+
+
+
+    def run_process(self, 
+            name_file = None, 
+            prefix_name = None,
+            detector_keypoints = "SIFT",
+            type_align_matrix = "affine",
+            target_resolution = None,
+            thresh_stages = THRESH_STAGES_DEFAULT,
+            field_stage = "Cuajado",
+            method_cal = None):
+        
+        self.is_running = True
+        #all_images_metadada_dict = {img_m['name']:img_m for img_m in self.images_data}
+        metadata_rgb_images = [img_m for img_m in self.images_data if "_D.JPG" in img_m['relative_path']]
+        n_images = len(metadata_rgb_images)
+        
+        metadata_rgb_images = self.process_features_extraction(metadata_rgb_images)
+        print("Comienza estimate_dom_parameters")
+        self.progress_update(10)
+        
+        if not self.check_continue_procress():
+            return
+        
+        dom_size, dom_bounds, dom_resolution = self.init_dom_parameters(metadata_rgb_images, target_resolution = target_resolution)
+        print("dom_size:", dom_size)
+        metadata_rgb_images = self.init_transform_to_dom(metadata_rgb_images, dom_bounds, dom_resolution)
+
+        self.progress_update(12)
+        
+        if not self.check_continue_procress():
+            return
+        
+        all_terrain_points_dom = [d['terrain_points_dom'] for d in metadata_rgb_images]
+        
+        
+        print("Comienza pairwase matches")
+        overlap_graph  = build_overlap_graph(all_terrain_points_dom, min_overlap=0.45)
+
+        edges, edges_low = self.estimate_pairwase_homographies(overlap_graph, metadata_rgb_images, "affine")
+
+        self.progress_update(30)
+
+        if not self.check_continue_procress():
+                return
+        
+        print("Comienza adjunt graph")
+        
+        adj_graph = build_adjacency_graph_from_edges(n_images, edges)
+        adj_graph_low = build_adjacency_graph_from_edges(n_images, edges_low)
+        self.progress_update(32)
+
+        if not self.check_continue_procress():
+                return
+        
+        print("Comienza Refine Homographies")
+
+        H_abs, disconected_points = self.refine_homographies(adj_graph, n_images, adj_graph_low)
+        
+        self.progress_update(36)
+
+        if not self.check_continue_procress():
+                return
+        
+        centers_images = [self.calcular_centro_promedio(points) for points in all_terrain_points_dom]
+
+        squere_ids = self.extraer_esquinas_opencv(centers_images, disconected_points)
+
+        centers_originals = [centers_images[s_id] for s_id in squere_ids]
+        print("squere_ids:", squere_ids)
+        print("centers_originals:", centers_originals)
+        H_squeres = [H_abs[id_s] for id_s in squere_ids]
+        print("H_squeres:", H_squeres)
+
+        centers_proj = [cv2.perspectiveTransform(np.array(c).reshape(-1, 1, 2), H_s)[0] for H_s, c in zip(H_squeres, centers_originals)]
+
+        H_perpective, _ = cv2.findHomography(np.array(centers_proj).reshape(-1, 1, 2), np.array(centers_originals).reshape(-1, 1, 2), method=cv2.RANSAC)
+        print("H_abs[0] \n", H_abs[0])
+        #for i in range(n_images):
+        #    H_abs[i] = H_perpective @ H_abs[i]
+
+        print("squere_ids:", squere_ids)
+        print("centers_originals:", centers_originals)
+        print("centers_proj:", centers_proj)
+        print("H_perpective\n", H_perpective)
+        print("H_abs[0] \n", H_abs[0])
+        
+        self.progress_update(40)
+
+        if not self.check_continue_procress():
+                return
+
+        (segmentations_in_dom, bboxes_in_dom), (segmentations_in_imgs, bboxes_in_imgs) = self.read_and_project_detections(metadata_rgb_images, H_abs)
+
+        print("segmentations_in_dom:", len(segmentations_in_dom))
+        print("bboxes_in_dom:", len(bboxes_in_dom))
+
+        print("segmentations_in_imgs:", len(segmentations_in_imgs))
+        print("bboxes_in_imgs:", len(bboxes_in_imgs))
+        # Aplanar todas las detecciones
+        boxes_dom = [box for bboxes in bboxes_in_dom for box in bboxes  if len(bboxes) > 0]
+        segs_dom = [seg for segs in segmentations_in_dom for seg in segs  if len(segs) > 0]
+        
+        boxes = [box for bboxes in bboxes_in_imgs for box in bboxes  if len(bboxes) > 0]
+        segmentations = [seg for segs in segmentations_in_imgs for seg in segs  if len(segs) > 0]
+
+        self.progress_update(52)
+
+        if not self.check_continue_procress():
+                return
+
+        final_mosaic, final_segs_dom, final_boxes_dom, selected_indexes, detect_to_imgid = self.create_global_mosaic_rgb_and_detects(
+            metadata_rgb_images,
+            H_abs,
+            dom_size = dom_size,        
+            batch_size = 300,
+            segmentations_in_dom = segmentations_in_dom,
+            bboxes_in_dom = bboxes_in_dom
+            )
+        
+        
+        final_mosaic = cv2.warpPerspective(
+            final_mosaic,
+            H_perpective,
+            (int(dom_size[1]), int(dom_size[0])),
+            flags=cv2.INTER_LANCZOS4  # Interpolación de alta calidad
+        )
+
+        self.progress_update(60)
+
+        if not self.check_continue_procress():
+                return
+        
+        ref_zone_lon = metadata_rgb_images[0]['longitude']
+        
+        name_file = self._get_name_file(name_file, prefix_name)
+
+        os.makedirs(f"{self.result_dir}/mosaic", exist_ok=True)
+
+        print("--------------Guardar Mosaic RGB-----------------")
+        print("--------------Dividiendo en tiles-----------------")
+        
+        os.makedirs(f"{self.result_dir}/mosaic/rgb", exist_ok=True)
+        
+        mosaic_path = f"{self.result_dir}/mosaic/rgb/mosaic_{name_file}"
+        
+        self.save_as_geotiff(
+                final_mosaic, 
+                mosaic_path, 
+                dom_bounds[0], dom_bounds[3],  # Esquina superior izquierda (X,Y)
+                dom_resolution,
+                ref_zone_lon
+        )
+
+        self.progress_update(65)
+
+        if not self.check_continue_procress():
+            return
+
+        self._generate_single_zoom_tiles(
+            input_raster = mosaic_path, 
+            output_dir = f"{self.result_dir}/mosaic/rgb/tiles", 
+            tile_size = 256)
+        
+        self.progress_update(70)
+
+        if not self.check_continue_procress():
+                return
+        
+        dir_trees = f"{self.result_dir}/mosaic/trees/masks"
+        os.makedirs(dir_trees, exist_ok=True)
+        
+        # Filter selected detections in dom 
+        det2imgid = np.array(detect_to_imgid).astype(np.int32)
+        det2imgid = det2imgid[selected_indexes]
+       
+        print("det2imgid[selected_indexes]:", len(det2imgid))
+
+        segmentations = [segmentations[index] for index in selected_indexes]
+        boxes = [boxes[index] for index in selected_indexes]
+
+        boxes_dom_filtered = [boxes_dom[index] for index in selected_indexes]
+        segs_dom_filtered = [segs_dom[index] for index in selected_indexes]
+        # 
+        print("aqui proyectar con la perspectiva")
+        print("segs_dom_filtered:", len(segs_dom_filtered))
+        segs_dom_filtered = seg_pts_to_dom(segs_dom_filtered, H_perpective)
+        print("segs_dom_filtered:", len(segs_dom_filtered))
+        boxes_dom_filtered = [bbox(seg) for seg in segs_dom_filtered]
+        # 
+        path_config_calib = f"{self.result_dir}/config_radiometric_cal.json"
+        
+        elc_bands = None
+        method_cal = method_cal or "DLS"
+
+        if method_cal == "ELC" and os.path.exists(path_config_calib):
+            with open(path_config_calib, "r") as f:
+                data_cal = json.load(f)
+                options = data_cal["options"]
+                option_choiced = data_cal["option_choiced"]
+                method_cal = options[option_choiced] #"ELC"
+                elc_bands = data_cal["elc_data"]["bands"]
+                estimate_elc_params(elc_bands)
+        # Mean VIs for detections and Save
+        
+        multispec_loader = MultiSpecImageLoader(
+            images_data = self.images_data,
+            method_cal = method_cal,
+            elc_params = elc_bands)
+        
+        
+        self.on_message("Analizando Arboles...")
+        
+        nitrogen_defclasifier = NitrogenDefClassiferML(thresh_stages=thresh_stages)
+        det_index = 0
+        trees_results = []
+        for i in range(n_images):
+
+            self.progress_update(70 + int(20 * (i / n_images)))
+
+            if not self.check_continue_procress():
+                return
+        
+            indexes_det_img = np.where(det2imgid == i)[0]
+            if len(indexes_det_img) > 0:
+                
+                im_data = metadata_rgb_images[i]
+                
+                segs_im = [segmentations[idx] for idx in indexes_det_img]
+                bboxes_im = [boxes[idx] for idx in indexes_det_img]
+                
+                boxes_dom_im = [boxes_dom_filtered[idx] for idx in indexes_det_img]
+                segs_dom_im = [segs_dom_filtered[idx] for idx in indexes_det_img]
+                
+                im_size = (im_data["h_ws"], im_data["w_ws"])
+                im_size_full = (im_data["image_height"], im_data["image_width"])
+                
+                bboxes_im_full, segs_im_full = self._resize_detection(bboxes_im, 
+                                       segs_im, 
+                                       src_size=(im_data["h_ws"], im_data['w_ws']),
+                                       tgt_size=im_size_full)
+
+                multispec_image, vis_aligned = multispec_loader.load_align_bands(rgb_path=im_data["relative_path"])
+                
+                cube = np.concatenate((multispec_image, vis_aligned), axis = 0)
+
+                #np.save(f"{dir_trees}/ndvi_image_{i}.npy", vis_aligned[0])
+                
+                for index in range(len(segs_dom_im)):
+                    seg_tree_dom = segs_dom_im[index]
+                    bbox_tree_dom = boxes_dom_im[index]
+                    seg_tree_dom = np.array(seg_tree_dom, dtype=np.int32)
+                    seg_tree_dom = seg_tree_dom.reshape((-1, 1, 2))
+
+                    x_min, y_min = int(bbox_tree_dom[0]), int(bbox_tree_dom[1])
+                    x_max, y_max = int(bbox_tree_dom[2]), int(bbox_tree_dom[3]) 
+                    print("x_min:", x_min, "y_min:", y_min)
+                    print(f"tree_{x_min}_{y_min}")
+                    
+                    
+                    mask_det = np.zeros(dom_size, dtype=np.uint8)
+                    cv2.drawContours(mask_det, [seg_tree_dom], -1, 255, thickness=-1)
+
+                    mask_det_cropped = mask_det[y_min:y_max, x_min:x_max]
+                    path_mask = f"{dir_trees}/tree_{x_min}_{y_min}.png"
+                    
+                    cv2.imwrite(path_mask, mask_det_cropped)
+                    
+                    
+                    bbox_tree_im = bboxes_im_full[index]
+                    seg_tree_im = segs_im_full[index]
+                    seg_tree_im = np.array(seg_tree_im, dtype=np.int32)
+                    seg_tree_im = seg_tree_im.reshape((-1, 1, 2))
+
+                    x_min_im, y_min_im = int(bbox_tree_im[0]), int(bbox_tree_im[1])
+                    x_max_im, y_max_im = int(bbox_tree_im[2]), int(bbox_tree_im[3]) 
+
+                    mask_det_im = np.zeros(im_size_full, dtype=np.uint8)
+                    cv2.drawContours(mask_det_im, [seg_tree_im], -1, 255, thickness=-1)
+                    
+                    print("mask_det_im:", mask_det_im.shape)
+                    mask_det_im_cropped = mask_det_im[y_min_im:y_max_im, x_min_im:x_max_im]
+                    
+                    
+                    print("vis_aligned:", vis_aligned.shape)
+                    ## Aplicamos Mascara de Arbol
+                    cube_cropped = cube.copy()
+                    cube_cropped = cube_cropped[:,y_min_im:y_max_im, x_min_im:x_max_im]
+                    cube_cropped[:, mask_det_im_cropped==0] = 0
+                    
+                    #np.save(f"{dir_trees}/cube_tree_im_{i}_{x_min_im}_{y_min_im}_dom_{x_min}_{y_min}.npy", cube_cropped)
+                    
+                    vis_cropped = vis_aligned[:,y_min_im:y_max_im, x_min_im:x_max_im]
+                    vis_cropped[:, mask_det_im_cropped==0] = 0
+                    print("vis_cropped:", vis_cropped.shape)
+                    #np.save(f"{dir_trees}/ndvi_tree_im_{i}_{x_min_im}_{y_min_im}_dom_{x_min}_{y_min}.npy", vis_cropped[0])
+                   
+                    cube_cropped[:,  vis_cropped[0] < 0.3] == 0
+                    #vis_cropped = vis_cropped[:,mask_det_im_cropped > 0]
+                    #print("vis_cropped:", vis_cropped.shape)
+                    #(mask_det_im_cropped > 0)[]
+                    
+                    #np.save(f"{dir_trees}/cube_tree_im_{i}_{x_min_im}_{y_min_im}_dom_{x_min}_{y_min}.npy", cube_cropped)
+                    
+                    vis_cropped = vis_cropped[:, vis_cropped[0] > 0.3] # ndvi > 0.3
+                    print("vis_cropped:", vis_cropped.shape)
+                  
+                    ndvi_mean, gndvi_mean, ndre_mean, ccci_mean, savi_mean, mcari_mean = vis_cropped.mean(axis = 1)
+                    
+                    print("ndvi_mean:", ndvi_mean)
+                    #avg_ndvi = random.uniform(0.6, 0.9)
+                    #mcari_avg = random.uniform(0.050, 0.10)  #detection_result["mcari_avg"]
+                    #posible-deficiencia
+                    #class_id = random.choices([0, 1], weights=[0.7, 0.3])[0]
+                    print("field_stage:", field_stage)
+                    
+                    
+                    nitrogen_pred, diagnosis_class = nitrogen_defclasifier.predict(cube_cropped[:,:,:-1], stage=field_stage) #clases[class_id]
+                    
+                    N_class = diagnosis_class
+                    
+                    if diagnosis_class == "posible-deficiencia":
+                        N_class = "precaución" 
+                    
+                    #if diagnosis_class == "saludable":
+                    #    if ndvi_mean < 0.70:
+                    #s        N_class = "precaución"
+
+                    # if mcari_mean > 0.070:
+                    #     Zn_class = "saludable"
+                    # elif mcari_mean > 0.055:
+                    #     Zn_class = "precaución"
+                    # else:
+                    #     Zn_class = "posible-problema"
+
+                    ndvi_state = None
+        
+                    if ndvi_mean > 0.70:
+                        ndvi_state = "saludable"
+                    elif ndvi_mean > 0.55:
+                        ndvi_state = "precaución"
+                    else: 
+                        ndvi_state = "posible-problema"
+                    #else:
+                    #    ndvi_state = "critico-problema"
+
+                    
+                    mcari_state = None
+                    if mcari_mean > 0.08:
+                        mcari_state = "saludable"
+                    elif mcari_mean > 0.05:
+                        mcari_state = "precaución"
+                    else:
+                        mcari_state = "posible-problema"
+                    
+                    Zn_class = mcari_state
+                    print("dom_resolution:", dom_resolution)
+                    print("area_pixeles:", (x_max - x_min) * (y_max - y_min ))
+                    area_tree = (x_max - x_min) * (y_max - y_min ) * (dom_resolution ** 2)
+                    print("area_tree:", area_tree)
+                    if area_tree < 1.5:
+                        continue
+
+                    trees_results.append({
+                        "id": det_index,
+                        "bbox": [x_min, y_min, x_max, y_max],# bbox_tree,
+                        "mask_path": path_mask,
+                        #"seg_path": f"{dir_trees}/tree_{x_min}_{y_min}.npy",
+                        "model_class_N": diagnosis_class,
+                        "avg_ndvi": float(ndvi_mean),
+                        "mcari_avg" : float(mcari_mean),
+                        "N_class": N_class,
+                        "Zn_class": Zn_class,
+                        "ndvi_state": ndvi_state,
+                        "mcari_state": mcari_state,
+                        "nitrogen_pred": nitrogen_pred
+                    })
+
+                    det_index +=1
+        
+        print("trees_results:", len(trees_results))
+        ## Ordenar y creaar ids
+        final_trees_results = []
+        sorted_trees_resultas = sorted(trees_results, key = lambda x: x["bbox"][0] + x["bbox"][1])
+        
+        first_tree = sorted_trees_resultas.pop(0)
+        i = 1
+        first_tree['id'] = i
+        first_tree["name"] = f"ARBOL-{i:03d}"
+        final_trees_results.append(first_tree)
+        
+        trees_results_temp = copy.deepcopy(sorted_trees_resultas)
+        current_tree_x = first_tree["bbox"][0]
+        i = 2
+        
+        while len(trees_results_temp) > 0:
+            sorted_trees_results_temp = sorted(trees_results_temp, key = lambda x: abs(x["bbox"][0] - current_tree_x) + 2* x["bbox"][1])
+            next_tree = sorted_trees_results_temp.pop(0)
+            trees_results_temp = sorted_trees_results_temp
+            current_tree_x = next_tree["bbox"][0]
+            next_tree['id'] = i
+            next_tree["name"] = f"ARBOL-{i:03d}"
+            final_trees_results.append(next_tree)
+            i+=1
+
+        print("final_trees_results:", len(final_trees_results))
+
+        with open(f"{self.result_dir}/mosaic/trees/trees_results.json", "w") as fp:
+            json.dump(final_trees_results, fp, indent=4)        
+
+
+        self.progress_update(95)
+
+        if not self.check_continue_procress():
+            return
+        
+        self.on_message("Guardando Resultados...")
+        # NDVI mean distribution
+        healthy_count_ndvi = 0
+        warning_count_ndvi = 0
+        possible_problem_count_ndvi = 0
+        critical_problem_count_ndvi = 0
+
+        for tree_result in final_trees_results:
+            if tree_result["ndvi_state"] == "saludable":
+                healthy_count_ndvi += 1
+            elif tree_result["ndvi_state"] == "precaución":
+                warning_count_ndvi += 1
+            elif tree_result["ndvi_state"] == "posible-problema":
+                possible_problem_count_ndvi += 1
+            else:
+                critical_problem_count_ndvi += 1
+
+        # MACARI mean distribution
+        healthy_count_mcari = 0
+        warning_count_mcari = 0
+        critical_problem_count_mcari = 0
+
+        for tree_result in final_trees_results:
+            if tree_result["mcari_avg"] > 0.08:
+                healthy_count_mcari += 1
+            elif tree_result["mcari_avg"] > 0.05:
+                warning_count_mcari += 1
+            else:
+                critical_problem_count_mcari += 1
+
+        # Crear una máscara: True donde algún canal NO es cero
+        mask_region = np.any(final_mosaic != 0, axis=2)
+
+        # Crear canal alfa: 255 donde hay imagen, 0 donde está vacío
+        alpha = (mask_region.astype(np.uint8) * 255)
+
+        # Convertir a BGRA
+        mosaic_image = cv2.cvtColor(final_mosaic, cv2.COLOR_BGR2BGRA)
+
+        # Reemplazar canal alfa
+        mosaic_image[:, :, 3] = alpha
+
+        path_mosaic_image = f"{self.result_dir}/mosaic/rgb/mosaic_base.png"
+        cv2.imwrite(path_mosaic_image, mosaic_image)
+        path_map_trees = create_map_trees_ids(mosaic_image = mosaic_image.copy(), base_dir = self.result_dir)
+        path_zinc_trees = create_map_trees_ids_zinc(mosaic_image = mosaic_image, base_dir = self.result_dir)
+
+        num_images = len(metadata_rgb_images)
+        alts = [im_data['relative_altitude'] for im_data in metadata_rgb_images]
+        avg_alt = sum(alts) / num_images
+        print("avg_alt:", avg_alt)
+
+        metadata_multispec_images = [img_m for img_m in self.images_data if "_D.JPG" not in img_m['relative_path']]
+        
+        multispec_gsd = [im_data['gsd_horizontal'] * 100 for im_data in metadata_multispec_images]
+        avg_gsd_multispec = sum(multispec_gsd) / len(multispec_gsd)
+
+        rgb_gsd = [im_data['gsd_horizontal'] * 100 for im_data in metadata_rgb_images]
+        avg_gsd_rgb = sum(rgb_gsd) / num_images
+        
+        over_sea_level_mean = round(np.mean([im_data['over_sea_level'] for im_data in metadata_rgb_images if im_data['over_sea_level']]),0)
+        
+        count_pixles = np.sum(np.any(final_mosaic > 0, axis=-1))
+        area_mosaic = (count_pixles * (dom_resolution**2)) / 10000
+        
+        fecha_formateada = ""
+        if len(self.images_data) > 0:
+            exif_str = self.images_data[0]['datetime_original']
+            dt = datetime.strptime(exif_str, "%Y:%m:%d %H:%M:%S")
+
+            # Formatear al formato deseado
+            fecha_formateada = dt.strftime("%d/%m/%Y")
+            hora_ampm = dt.strftime("%I %p").lstrip("0")
+
+        path_card_map = f"{self.result_dir}/mosaic/rgb/report_images/card_map.png"
+
+        processing_sumary = dict(
+            mosaic_rgb = mosaic_path,
+            mosaic_base_rgb = path_mosaic_image,
+            #mosaic_ndvi = ndvi_path,
+            trees_count = len(final_trees_results),
+            total_images = len(self.images_data),
+            avg_alt = avg_alt,
+            masl = over_sea_level_mean,
+            avg_gsd_rgb = avg_gsd_rgb,
+            avg_gsd_multispec = avg_gsd_multispec,
+            area_mosaic = area_mosaic,
+            map_trees = path_map_trees,
+            zinc_map_trees = path_zinc_trees,
+            card_map = path_card_map,
+            adquisition_date = fecha_formateada,
+            hora_ampm = hora_ampm,
+            healthy_count_ndvi = healthy_count_ndvi,
+            warning_count_ndvi = warning_count_ndvi,
+            possible_problem_count_ndvi = possible_problem_count_ndvi,
+            critical_problem_count_ndvi = critical_problem_count_ndvi,
+            healthy_count_mcari = healthy_count_mcari,
+            warning_count_mcari = warning_count_mcari,
+            critical_problem_count_mcari = critical_problem_count_mcari
+        )
+
+        with open(f"{self.result_dir}/processing_sumary.json", "w") as f:
+            json.dump(processing_sumary, f, indent =2)
+
+
+        self.progress_update(100)
+
+        if not self.check_continue_procress():
+                return
+        
     def run(self, 
             name_file = None, 
             prefix_name = None,
@@ -3362,7 +4524,7 @@ class ImageSticher():
         
         #NitrogenDefClassifer.configure("./best_resnet18_6ch.pth")
         
-        trees_diagnosis_results = self.apply_diagnosis_process(unique_trees_results, all_images_metadada_dict)
+        trees_diagnosis_results = self.apply_diagnosis_process(unique_trees_results,   all_images_metadada_dict )
         print("--------------Guardando Arboles en Mosaico-----------------")
         self.save_trees_masks_mosaic(H_abs_global, 
                                      trees_diagnosis_results,
@@ -3415,6 +4577,9 @@ class ImageSticher():
 
         # Reemplazar canal alfa
         mosaic_image[:, :, 3] = alpha
+        path_mosaic_base = f"{self.result_dir}/mosaic/rgb/mosaic_base.png"
+
+        cv2.imwrite(path_mosaic_base, mosaic_image)
 
         path_map_trees = create_map_trees_ids(mosaic_image = mosaic_image, base_dir = self.result_dir)
         path_zinc_trees = create_map_trees_ids_zinc(mosaic_image = mosaic_image, base_dir = self.result_dir)
@@ -3446,10 +4611,11 @@ class ImageSticher():
             fecha_formateada = dt.strftime("%d/%m/%Y")
             hora_ampm = dt.strftime("%I %p").lstrip("0")
 
-        path_card_map = f"{self.result_dir}/mosaic/rgb/card_map.png"
+        path_card_map = f"{self.result_dir}/mosaic/rgb/report_images/card_map.png"
 
         processing_sumary = dict(
             mosaic_rgb = mosaic_path,
+            mosaic_rgb_base = path_mosaic_base,
             #mosaic_ndvi = ndvi_path,
             trees_count = len(unique_detects_trees),
             total_images = len(all_images_metadada_dict),
@@ -3476,52 +4642,6 @@ class ImageSticher():
             json.dump(processing_sumary, f, indent =2)
         
         
-        # if not self.check_continue_procress():
-        #         return
-        
-        # final_dom_out = final_dom.copy()
-        # trees_mask_green = np.zeros_like(final_dom, dtype=np.uint8)
-        # trees_mask_green[trees_mask > 0] = [0, 255, 0]
-        # final_dom_out[trees_mask > 0] = [0, 255, 0]
-        # alpha = 0.45
-
-        # final_out = cv2.addWeighted(final_dom_out, alpha, final_dom, 1-alpha, 0)
-
-        # final_result_path = f"{self.result_dir}/mosaic/{name_file[:-4]}_TREES_RESULT.tif"
-
-        # self.save_as_geotiff(
-        #     final_out,
-        #     final_result_path,
-        #     dom_bounds[0], dom_bounds[3],  # Esquina superior izquierda (X,Y)
-        #     dom_resolution,
-        #     ref_zone_lon
-        # )
-
-        # if not self.check_continue_procress():
-        #     return
-
-        # self._generate_single_zoom_tiles(
-        #     input_raster = final_result_path, 
-        #     output_dir = f"{self.result_dir}/mosaic/tiles_result", 
-        #     tile_size = 256)
-        
-        # final_masks_trees = f"{self.result_dir}/mosaic/{name_file[:-4]}_MASK_TREES.tif"
-
-        # self.save_as_geotiff(
-        #     trees_mask_green,#np.expand_dims(trees_mask, axis=-1),
-        #     final_masks_trees,
-        #     dom_bounds[0], dom_bounds[3],  # Esquina superior izquierda (X,Y)
-        #     dom_resolution,
-        #     ref_zone_lon,
-        #     alpha=0.5
-        # )
-
-        # self._generate_single_zoom_tiles(
-        #     input_raster = final_masks_trees, 
-        #     output_dir = f"{self.result_dir}/mosaic/tiles_mask_trees", 
-        #     tile_size = 256)
-        
-        
         self.progress_update(100)
 
 if __name__ == "__main__":
@@ -3529,12 +4649,10 @@ if __name__ == "__main__":
     df_images = pd.read_csv("./df_images_metadata.csv")
     df_images_slice = df_images.iloc[0,:50]
     print(df_images_slice)
-    #generate_mosaic(df_images.to_dict(orient='index'), type_align_matrix = "affine", signal_progress = None)
     image_sticher = ImageSticher(images_data =  df_images_slice.to_dict(orient='index'))
 
     image_sticher.run(save_dir = "./", 
                       prefix_name="Vuelo-Agosto-15-Campo2-Accopampa")
-    #generate_mosaic(all_images_data, type_align_matrix = "affine")
 #type_align_matrix = "affine"
 #transforms = propagate_pairwise_correction(df_images_filtered_slice.reset_index().to_dict(orient='index'), type_align_matrix)
 

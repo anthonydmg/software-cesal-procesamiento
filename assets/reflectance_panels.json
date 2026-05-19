@@ -1,0 +1,47 @@
+{
+    "blue": {
+        "target_name": "azul",
+        "reflectance_bands": {
+            "green": 0.025194826227273325,
+            "red": 0.02909067063212037,
+            "rededge": 0.3526375053041845,
+            "nir": 0.47100432734019837
+        }
+    },
+    "gray": {
+        "target_name": "gris",
+        "reflectance_bands": {
+            "green": 0.08060138144862748,
+            "red": 0.10222299108523808,
+            "rededge": 0.4144980238754347,
+            "nir": 0.42783049944233037
+        }
+    },
+    "black": {
+        "target_name": "negro",
+        "reflectance_bands": {
+            "green": 0.03402317631075906,
+            "red": 0.04438064890266214,
+            "rededge": 0.3365399654457738,
+            "nir": 0.41157942498422667
+        }
+    },
+    "red": {
+        "target_name": "rojo",
+        "reflectance_bands": {
+            "green": 0.03342123029448009,
+            "red": 0.5915666506746208,
+            "rededge": 0.6875279650908674,
+            "nir": 0.7383049008866711
+        }
+    },
+    "green": {
+        "target_name": "verde",
+        "reflectance_bands": {
+            "green": 0.15294306015732675,
+            "red": 0.0433104492059193,
+            "rededge": 0.11531875647889525,
+            "nir": 0.5818267595073537
+        }
+    }
+}

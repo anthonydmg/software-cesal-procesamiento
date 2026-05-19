@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="128" height="128">
+  <defs>
+    <mask id="cutout-front">
+      <rect width="24" height="24" fill="white" />
+      <circle cx="18" cy="7.5" r="1.5" fill="black" />
+      <path d="M 9 16.5 L 12.5 11 L 15 14 L 17.5 10 L 21 16.5 Z" fill="black" />
+    </mask>
+    
+    <mask id="hide-back">
+      <rect width="24" height="24" fill="white" />
+      <rect x="8" y="4" width="14" height="14" rx="2" fill="black" />
+    </mask>
+  </defs>
+
+  <rect 
+    x="4" y="8" 
+    width="14" height="14" 
+    rx="2" 
+    fill="none" 
+    stroke="#3E4A42" 
+    stroke-width="2.5" 
+    mask="url(#hide-back)" 
+  />
+
+  <rect 
+    x="8" y="4" 
+    width="14" height="14" 
+    rx="2" 
+    fill="#3E4A42" 
+    mask="url(#cutout-front)" 
+  />
+</svg>

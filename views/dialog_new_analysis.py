@@ -1,11 +1,13 @@
-from PySide6.QtWidgets import QApplication, QDialog, QStackedWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QFileDialog, QFrame, QListWidget, QProgressBar, QTableWidget, QScrollArea, QTableWidgetItem, QWidget, QComboBox
+from PySide6.QtWidgets import QApplication, QDialog, QStackedWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QFileDialog, QFrame, QListWidget, QProgressBar, QTableWidget, QScrollArea, QTableWidgetItem, QWidget, QComboBox , QAbstractItemView
 from PySide6.QtCore import Qt, Signal, QObject, Slot, QThread
 import os
 import numpy as np
+from core.constants import ETAPAS_FENOLOGICAS, THRESH_STAGES_DEFAULT, TIPOS_RIEGOS, TIPOS_SUELOS
 from core.utils import get_gps_coordinates, get_image_resolution, get_metadata, calcule_gsd_teorico, get_relative_altitude, get_gimbal_euler_angles
-import pandas as pd
 from multiprocessing import Pool
 from datetime import datetime
+from PySide6.QtWidgets import QHeaderView
+
 
 class InitialConfigureScreen(QFrame):
     def __init__(self, parent = None, dialog_parent=None):
@@ -14,7 +16,7 @@ class InitialConfigureScreen(QFrame):
         layout = QVBoxLayout()
 
         name_layout = QHBoxLayout()
-        name_label = QLabel("Nombre:")
+        name_label = QLabel('Nombre <span style="color:red;">*</span>:')
         self.name_input = QLineEdit()
         self.name_input.textChanged.connect(self.validate_inputs)  # Validar al escribir
         name_layout.addWidget(name_label)
@@ -22,17 +24,84 @@ class InitialConfigureScreen(QFrame):
         layout.addLayout(name_layout)
 
         folder_layout = QHBoxLayout()
-        folder_label = QLabel("Crear en:")
+        folder_label = QLabel('Crear en <span style="color:red;">*</span>:')
         self.folder_input = QLineEdit()
         self.folder_input.setReadOnly(True)  # Para evitar que el usuario escriba manualmente
         self.folder_input.textChanged.connect(self.validate_inputs)  # Validar al escribir
         self.folder_button = QPushButton("Seleccionar")
         self.folder_button.clicked.connect(self.select_folder)
         
+
         folder_layout.addWidget(folder_label)
         folder_layout.addWidget(self.folder_input)
         folder_layout.addWidget(self.folder_button)
+        
         layout.addLayout(folder_layout)
+
+        details_field = QLabel("INFORMACION DE LA PARCELA")
+        details_field.setStyleSheet("font-weight: bold; font-size: 12px; margin-bottom: 4px; margin-top: 10px;")
+        details_field.setAlignment(Qt.AlignTop)
+
+        layout.addWidget(details_field)
+ 
+        #ETAPA_FENOLOGICA = ["Inicio de brote", "Pre-floración", "Floración", 
+        #                    "Cuajado", "Maduración", "Cosecha"]
+
+        #stage_layout = QVBoxLayout
+        stage_layout = QHBoxLayout()
+
+        stage_label = QLabel('Etapa Fenológica <span style="color:red;">*</span>:')
+        stage_label.setAlignment(Qt.AlignTop)
+        self.stage_cb = QComboBox()
+        self.stage_cb.addItems(["Seleccionar"] + ETAPAS_FENOLOGICAS)
+        self.stage_cb.currentIndexChanged.connect(self.validate_inputs)
+
+        self.setStyleSheet("""
+            QComboBox {
+                padding: 5px 5px;
+                min-height: 15px;
+            }
+            
+            QComboBox QAbstractItemView {
+               padding: 5px;
+            }
+        """)
+        
+        #stage_cb.setAlignment(Qt.AlignTop)
+        stage_layout.addWidget(stage_label, 1)
+        stage_layout.addWidget(self.stage_cb, 4)
+        
+        layout.addLayout(stage_layout)
+
+        #TIPO_SUELO = ["Arenoso", "Franco ", "Arcilloso", 
+        #                    "Limoso", "Pedregoso"]
+        
+        soil_layout = QHBoxLayout()
+
+        soil_label = QLabel("Tipo de Suelo:")
+        soil_label.setAlignment(Qt.AlignTop)
+        self.soil_cb = QComboBox()
+        self.soil_cb.addItems(["Seleccionar"] + TIPOS_SUELOS)
+        #soil_cb.setAlignment(Qt.AlignTop)
+        soil_layout.addWidget(soil_label, 1)
+        soil_layout.addWidget(self.soil_cb, 4)
+        layout.addLayout(soil_layout)
+
+        #TIPO_RIEGO = ["Gravedad", "Aspersión ", "Geteo", 
+        #                    "Microaspersión"]
+        
+        
+        irrigation_layout = QHBoxLayout()
+        irrigation_label = QLabel("Tipo de Riego")
+        irrigation_label.setAlignment(Qt.AlignTop)
+        self.irrigation_cb = QComboBox()
+        self.irrigation_cb.addItems(["Seleccionar:"] + TIPOS_RIEGOS)
+        #irrigation_cb.setAlignment(Qt.AlignTop)
+        irrigation_layout.addWidget(irrigation_label, 1)
+        irrigation_layout.addWidget(self.irrigation_cb, 4)
+        layout.addLayout(irrigation_layout)
+
+        layout.addStretch()
 
         button_layout = QHBoxLayout()
         self.next_button = QPushButton("Siguiente")
@@ -59,6 +128,9 @@ class InitialConfigureScreen(QFrame):
         
         name = self.name_input.text().strip()
         folder_path = self.folder_input.text().strip()
+        stage = None if self.stage_cb.currentIndex() == 0 else self.stage_cb.currentText()
+        soil_type = None if self.soil_cb.currentIndex() == 0 else self.soil_cb.currentText()
+        irrigation_type = None if self.irrigation_cb.currentIndex() == 0 else self.irrigation_cb.currentText()
         # Construir la ruta final
         final_path = os.path.join(folder_path, name)
         
@@ -70,6 +142,9 @@ class InitialConfigureScreen(QFrame):
 
            
             self.dialog_parent.new_analysis_data_store.set_name(name)
+
+            self.dialog_parent.new_analysis_data_store.update_field_info(stage, soil_type, irrigation_type)
+
             # Llamar al método para cambiar de pantalla
             self.dialog_parent.go_to_image_selection_screen()
         except Exception as e:
@@ -88,13 +163,20 @@ class InitialConfigureScreen(QFrame):
         name_filled = bool(self.name_input.text().strip())
         folder_filled = bool(self.folder_input.text().strip())
 
+         # Si está en "Seleccionar", índice = 0 → no válido
+        stage_ok = self.stage_cb.currentIndex() != 0
+
         # Estilo rojo si está vacío, normal si está lleno
         self.name_input.setStyleSheet("border: 1px solid red;" if not name_filled else "")
         self.folder_input.setStyleSheet("border: 1px solid red;" if not folder_filled else "")
 
         # Habilitar o deshabilitar el botón de siguiente
-        self.next_button.setEnabled(name_filled and folder_filled)
-    
+        if name_filled and folder_filled and stage_ok:
+            self.next_button.setEnabled(True)
+        else:
+            self.next_button.setEnabled(False)
+        
+       
     def validate_and_continue(self):
         """Verifica si los campos están llenos antes de avanzar a la siguiente pantalla."""
         self.validate_inputs()  # Actualiza los estilos visuales
@@ -164,7 +246,6 @@ class MetadataWorker(QObject):
 def read_metadata_worker(path):
     try:
         metadata = get_metadata(path)
-        print("metadata:", metadata)
         latitude, longitude = get_gps_coordinates(metadata)
         image_width, image_height = get_image_resolution(metadata)
         yaw_degree, pitch_degree, roll_degree = get_gimbal_euler_angles(metadata)
@@ -282,9 +363,18 @@ class MetadataProcessWorker(QObject):
         self.finished.emit()
     
 class ImageSelectionScreen(QFrame):
-    def __init__(self, parent = None, dialog_parent=None):
+    def __init__(self, 
+                    parent = None, 
+                    dialog_parent=None, 
+                    first_page = False,
+                    on_update_images_metadata = None,
+                    on_next_page = None):
+        
         super().__init__(parent)
         self.dialog_parent = dialog_parent  # Almacena la referencia a NewAnalysisDialog
+        self.on_update_images_metadata = on_update_images_metadata
+        self.on_next_page = on_next_page
+
         layout = QVBoxLayout()
 
         self.info_label = QLabel("\u274C Se requieren al menos 3 imágenes en formato JPG o TIFF.")
@@ -379,8 +469,13 @@ class ImageSelectionScreen(QFrame):
         self.progress_bar.setVisible(False)
 
         button_layout = QHBoxLayout()
-        self.back_button = QPushButton("< Atrás")
-        self.back_button.clicked.connect(self.go_back_to_initial)
+        if not first_page:
+            self.back_button = QPushButton("< Atrás")
+            self.back_button.clicked.connect(self.go_back_to_initial)
+        else:
+            self.back_button = QPushButton("Cancelar")
+            self.back_button.clicked.connect(self.close_dialog)
+        
         button_layout.addWidget(self.back_button)
         
         self.next_button = QPushButton("Siguiente >")
@@ -389,6 +484,13 @@ class ImageSelectionScreen(QFrame):
         button_layout.addWidget(self.next_button)
         layout.addLayout(button_layout)
         self.setLayout(layout)
+
+    def close_dialog(self):
+        parent = self.dialog_parent
+        if isinstance(parent, QDialog):
+            parent.reject() 
+        else:
+            parent.close()
 
     def add_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Seleccionr carpeta")
@@ -406,6 +508,12 @@ class ImageSelectionScreen(QFrame):
             self.image_list.addItems(files)
         self.validate_selection()
     
+    def add_path_images(self, files):
+        if files:
+            self.image_list.addItems(files)
+        
+        self.validate_selection()
+
     def validate_selection(self):
         if self.image_list.count() >= 3:
             self.info_label.setText("✔ Imágenes seleccionadas correctamente.")
@@ -451,12 +559,20 @@ class ImageSelectionScreen(QFrame):
     
     def on_all_metadata_ready(self, metadata_list):
         self.next_button.setEnabled(True)
-        for idx, metadata in enumerate(metadata_list):
-            if metadata:
-                self.dialog_parent.new_analysis_data_store.add_image_data(idx, metadata)
+
+        if self.on_update_images_metadata is not None:
+            self.on_update_images_metadata(metadata_list)
+        else:
+            for idx, metadata in enumerate(metadata_list):
+                if metadata:
+                    self.dialog_parent.new_analysis_data_store.add_image_data(idx, metadata)
 
         # Ir a la siguiente pantalla
-        self.dialog_parent.go_to_image_data_table()
+        print("self.on_next_page", self.on_next_page)
+        if self.on_next_page is not None:
+            self.on_next_page()
+        else:
+            self.dialog_parent.go_to_image_data_table()
 
     def on_metadata_loaded(self, index, metadata):
         self.dialog_parent.new_analysis_data_store.add_image_data(index, metadata)
@@ -499,29 +615,47 @@ class ImageSelectionScreen(QFrame):
 
 class ImageDataTableScreen(QFrame):
     finished_configure = Signal()
-    def __init__(self, parent = None, dialog_parent=None):
+    def __init__(self, parent = None, 
+                 dialog_parent = None,
+                 on_next_page = None,
+                 on_prev_page = None):
         super().__init__(parent)
         self.dialog_parent = dialog_parent  # Almacena la referencia a NewAnalysisDialog
-        layout = QVBoxLayout()
+        self.on_next_page = on_next_page
+        self.on_prev_page = on_prev_page
 
+        layout = QVBoxLayout()
+   
         # Título de la pantalla
         self.title_label = QLabel("Propiedades de Imagen")
+        self.title_label.setStyleSheet("font-weight: bold; font-size: 14px; margin-bottom: 4px;")
+
         self.title_label.setAlignment(Qt.AlignCenter)  # Centra el título
         layout.addWidget(self.title_label)
 
         # Crear la tabla
         self.table = QTableWidget()
         self.table.setRowCount(0)
-        self.table.setColumnCount(7)
+        self.table.setColumnCount(9)
         self.table.setHorizontalHeaderLabels(["Nombre","Ancho","Alto", "Latitud", "Longitud", "Ángulo Yaw", "Ángulo Pitch", "Ángulo Roll", "Fecha"])
-        self.table.setColumnWidth(0, 220)  # El primer parámetro es el índice (0), el segundo los píxeles
-        #self.add_image_data()
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
 
+        header = self.table.horizontalHeader()
+
+        header.setSectionResizeMode(QHeaderView.Interactive)  # todas manuales
+        header.setStretchLastSection(True)
+
+        #header.setSectionResizeMode(0, QHeaderView.Stretch)   # solo "Nombre" se adapta
+
+        #self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.setColumnWidth(0, 250)  # El primer parámetro es el índice (0), el segundo los píxeles
+        #self.add_image_data()
+        
         # Crear un área de desplazamiento para la tabla
         scroll_area = QScrollArea()
         scroll_area.setWidget(self.table)
         scroll_area.setWidgetResizable(True)  # Hacer que la tabla se ajuste al tamaño del área
-
+        scroll_area.setAlignment(Qt.AlignCenter)
         scroll_area.setStyleSheet("""
             QScrollBar:vertical {
                 background: #f0f0f0; /* fondo de la barra */
@@ -580,7 +714,18 @@ class ImageDataTableScreen(QFrame):
         layout.addLayout(button_layout)
 
         self.setLayout(layout)
-    
+
+    def _convert_format_date(self, date_str):
+        # Convertir a datetime
+        if date_str is None:
+            return ""
+        date = datetime.strptime(date_str, "%Y:%m:%d %H:%M:%S")
+
+        # Formato más entendible (día/mes/año hora)
+        date_parsed = date.strftime("%d/%m/%Y %H:%M:%S")
+
+        return date_parsed
+
     def update_data_table(self, images_data):
         table_data = [[ metadata["name"],
             metadata["image_width"],
@@ -590,7 +735,7 @@ class ImageDataTableScreen(QFrame):
             metadata["yaw_degree"],
             metadata["pitch_degree"],
             metadata["roll_degree"],
-            metadata["datetime_original"],
+            self._convert_format_date(metadata["datetime_original"]),
                 ] for metadata in images_data.values()]
 
         self.table.setRowCount(0)
@@ -610,7 +755,10 @@ class ImageDataTableScreen(QFrame):
                 self.table.setItem(row_position, column, QTableWidgetItem(str(value)))
     
     def go_back_to_image_selection(self):
-        self.dialog_parent.go_back_to_image_selection()
+        if self.on_prev_page is not None:
+            self.on_prev_page()
+        else:
+            self.dialog_parent.go_back_to_image_selection()
     
     # def add_image_data(self):
     #     image_data = [["Imagen1.jpg", "12.345", "-67.890", "139.5", "-90.0", "180.00" , "2025-01-28"],
@@ -624,7 +772,10 @@ class ImageDataTableScreen(QFrame):
     #             self.table.setItem(row_position, column, QTableWidgetItem(value))
 
     def finish_configure(self):
-        
+        if self.on_next_page is not None:
+            self.on_next_page()
+        else:
+            self.dialog_parent.go_to_manager_multi_specs_bands()
         #self.finished_configure.emit()
         ## Aqui guardar datos en json
         ## self.new_analysis_data_store.images_data
@@ -644,7 +795,7 @@ class ImageDataTableScreen(QFrame):
         
         #self.save_configure_analysis(base_dir, config)
 
-        self.dialog_parent.go_to_manager_multi_specs_bands()
+        
 
         #if isinstance(self.dialog_parent, QDialog):
         #    self.dialog_parent.accept()  
@@ -657,11 +808,36 @@ class ImageDataTableScreen(QFrame):
             json.dump(data, f, indent=4)    
 
 class AnalysisData:
-    def __init__(self, base_dir = ".", name = None, images_data = None):
+    def __init__(self, base_dir = ".", name = None, images_data = None, 
+                 alt_avg = None, gsd_avg = None, identifier_id = None, adquisition_date = None):
         self.images_data = images_data
         self.base_dir = base_dir
         self.name = name
+        self.field_info = dict(stage = "Cuajado", soil_type = None, irrigation_type = None)
+        self.alt_avg = alt_avg
+        self.gsd_avg = gsd_avg
+        self.identifier_id = identifier_id
+        self.adquisition_date = adquisition_date
+        self.processing_config = dict(option_resolution = 0,
+                                      target_resolution = None, 
+                                      threshold_nitrogen = None)
+        self.options_resolutions = []
+        print("self.gsd_avg:", self.gsd_avg)
+
+        if self.gsd_avg is not None:
+            self.options_resolutions = [self.gsd_avg * 8 , self.gsd_avg * 6, self.gsd_avg * 4]
+            self.set_target_resolution(self.processing_config["option_resolution"])
+        
+        print("self.options_resolutions:", self.options_resolutions)
+        
+        self.thresh_stages = THRESH_STAGES_DEFAULT
     
+    def set_adquisition_date(self, fecha):
+        self.adquisition_date = fecha
+        
+    def set_images_data(self, images_data):
+        self.images_data = images_data
+
     def add_image_data(self, id_img, metadata):
         if self.images_data is None:
             self.images_data = {}
@@ -673,6 +849,47 @@ class AnalysisData:
     def set_name(self, name):
         self.name = name
 
+    def set_alt_avg(self, value):
+        self.alt_avg = value
+    
+    def set_gsd_avg(self, value):
+        self.gsd_avg = value
+        self.options_resolutions = [value * 8 , value * 6, value * 4]
+        self.set_target_resolution(self.processing_config["option_resolution"])
+    
+    def set_target_resolution(self, value):
+        self.processing_config["option_resolution"] = value
+        self.processing_config["target_resolution"] = self.options_resolutions[value]
+
+    def set_thresh_stages(self, thresh_stages):
+        self.thresh_stages = thresh_stages
+        self.processing_config["threshold_nitrogen"] = self.thresh_stages[self.field_info["stage"]]
+    
+    def update_thresh_stage(self, stage, threshold_nitrogen):
+        self.thresh_stages[stage] = threshold_nitrogen
+
+    def update_stage(self, stage):
+        if stage is not None:
+            self.field_info["stage"] = stage
+            self.processing_config["threshold_nitrogen"] = self.thresh_stages[stage]
+
+    def update_field_info(self, stage = None, soil_type = None, irrigation_type = None):
+        self.field_info.update({
+            "stage": stage,
+            "soil_type": soil_type,
+            "irrigation_type": irrigation_type
+        })
+        
+        if stage is not None:
+            self.processing_config["threshold_nitrogen"] = self.thresh_stages[stage]
+    
+    def update_processing_config(self, option_resolution = 0, target_resolution = None, threshold_nitrogen = None):
+        self.processing_config.update({
+            "option_resolution": option_resolution,
+            "target_resolution": target_resolution,
+            "threshold_nitrogen": threshold_nitrogen
+        })
+        
 
 # --- NUEVA CONFIGURACIÓN DE ANCHOS ---
 # [Index, RGB, Roja, Verde, NIR, Red Edge, Eliminar]
@@ -701,9 +918,10 @@ class BandSelector(QComboBox):
     
 
 class CaptureRow(QFrame):
-    def __init__(self, index, is_new=False):
+    def __init__(self, index, parent_manager=None, is_new=False):
         super().__init__()
         self.setFixedHeight(70)
+        self.parent_manager=parent_manager
         self.setObjectName("FilaCaptura")
         
         self.setStyleSheet("""
@@ -757,6 +975,11 @@ class CaptureRow(QFrame):
             }
             QPushButton:hover { color: #B91C1C; }
         """)
+
+        for cb in [self.rgb_band_cb, self.red_band_cb, self.green_band_cb,
+           self.nir_band_cb, self.re_band_cb]:
+            cb.currentIndexChanged.connect(self.parent_manager.validate_all_rows)
+    
         self.btn_delete.clicked.connect(self.deleteLater)
         layout.addWidget(self.btn_delete)
     
@@ -777,9 +1000,14 @@ class CaptureRow(QFrame):
         self.update()
 
 class ManagerMultiSpecBanbScreen(QFrame):
-    def __init__(self, dialog_parent = None):
+    def __init__(self, 
+                 dialog_parent = None,
+                 on_prev_page = None,
+                 on_finish_configure = None):
         super().__init__()
         self.dialog_parent = dialog_parent
+        self.on_prev_page = on_prev_page
+        self.on_finish_configure = on_finish_configure
         self.setWindowTitle("Gestor de Bandas")
         self.resize(1150, 700)
         self.setStyleSheet("background-color: white;")
@@ -876,7 +1104,7 @@ class ManagerMultiSpecBanbScreen(QFrame):
         table_vbox.addWidget(self.scroll)
         main_layout.addWidget(self.table_box)
         self.rows_widgets = []
-
+        
         # Filas iniciales
         #for i in range(1, 4):
         #    self.rows_layout.addWidget(CaptureRow(i))
@@ -885,13 +1113,13 @@ class ManagerMultiSpecBanbScreen(QFrame):
         # Botones en la parte inferior
         button_layout = QHBoxLayout()
         self.back_button = QPushButton("< Atrás")
-        self.back_button.clicked.connect(self.go_image_table_selection)
+        self.back_button.clicked.connect(self.go_prev_page)
         button_layout.addWidget(self.back_button)
 
         self.finished_button = QPushButton('Finalizar')
         self.finished_button.clicked.connect(self.finish_configure)
         button_layout.addWidget(self.finished_button)
-
+        self.finished_button.setEnabled(False)
         main_layout.addLayout(button_layout)
 
     @Slot()
@@ -899,8 +1127,11 @@ class ManagerMultiSpecBanbScreen(QFrame):
         # Añade la fila nueva al principio
         self.rows_layout.insertWidget(0, CaptureRow(0, is_new=True))
     
-    def go_image_table_selection(self):
-        self.dialog_parent.go_to_image_data_table()
+    def go_prev_page(self):
+        if self.on_prev_page is not None:
+            self.on_prev_page()
+        else:
+            self.dialog_parent.go_to_image_data_table()
     
     def update_tables(self, rgb_names, red_names, green_names, nir_names, re_names):
         num_rows = len(rgb_names)
@@ -911,14 +1142,51 @@ class ManagerMultiSpecBanbScreen(QFrame):
             self.btn_new.setEnabled(False)
 
         for i in range(num_rows):
-            row_wb = CaptureRow(i)
+            row_wb = CaptureRow(i, parent_manager=self)
             row_wb.update_options(rgb_names, red_names, green_names, nir_names, re_names)
             row_wb.rgb_band_cb.setCurrentIndex(i + 1)
+            row_wb.red_band_cb.setCurrentIndex(i + 1)
+            row_wb.green_band_cb.setCurrentIndex(i + 1)
+            row_wb.nir_band_cb.setCurrentIndex(i + 1)
+            row_wb.re_band_cb.setCurrentIndex(i + 1)
             self.rows_widgets.append(row_wb)
             self.rows_layout.addWidget(row_wb)
+        
+        self.validate_all_rows()
 
     
+    def validate_all_rows(self):
+        all_valid = True
+
+        for row in self.rows_widgets:
+            combos = [
+                row.rgb_band_cb,
+                row.red_band_cb,
+                row.green_band_cb,
+                row.nir_band_cb,
+                row.re_band_cb
+            ]
+
+            for cb in combos:
+                if cb.currentIndex() == 0:  # "Seleccionar"
+                    all_valid = False
+                    break
+
+            if not all_valid:
+                break
+
+        self.finished_button.setEnabled(all_valid)
+
     def finish_configure(self):
+        
+        rows_bands = []
+        for r_w in self.rows_widgets:
+            bands = r_w.get_values_row()
+            rows_bands.append(bands)
+
+        if self.on_finish_configure is not None:
+            self.on_finish_configure(rows_bands)
+            return
         
         images_data = self.dialog_parent.new_analysis_data_store.images_data
 
@@ -932,17 +1200,252 @@ class ManagerMultiSpecBanbScreen(QFrame):
                                                    nir = bands[3],
                                                    re = bands[4])
 
+        avg_alt = None
+        avg_gsd = None
+
+        if images_data:
+            num_images = len(images_data)
+            alts = [im_data['relative_altitude'] for im_data in images_data.values()]
+            avg_alt = sum(alts) / num_images
+            print("avg_alt:", avg_alt)
+
+            gsds = [im_data['gsd_horizontal'] for im_data in images_data.values() if "_D.JPG" not in im_data['relative_path']]
+            avg_gsd = sum(gsds) / len(gsds) 
+
+        self.dialog_parent.new_analysis_data_store.set_gsd_avg(avg_gsd)
+        self.dialog_parent.new_analysis_data_store.set_alt_avg(avg_alt)
+        
+        #self.dialog_parent.new_analysis_data_store.update_processing_config(option_resolution = 0,
+         #                                                                   target_resolution = avg_gsd * 8, 
+        #                                                                   threshold_nitrogen = 2.0)
+
         self.dialog_parent.finished_configure.emit()
         if isinstance(self.dialog_parent, QDialog):
             self.dialog_parent.accept()  
         else:
             self.dialog_parent.close()
 
+class ImageManagerDialog(QDialog):
+    def __init__(self, parent=None, images_files = []):
+        super().__init__(parent)
+        self.setWindowTitle("Gestionar Imagenes")
+        self.setFixedSize(1280, 650)
+        self.stacked_widget = QStackedWidget(self)  # Contenedor principal de pantallas
+        self.setLayout(QVBoxLayout())
+        self.layout().addWidget(self.stacked_widget)
+        
+        self.images_data = dict()
+        self.flight_info = dict(gsd_avg = None, alt_avg = None)
+        self.image_selection_screen = ImageSelectionScreen(dialog_parent = self, 
+                                                           first_page = True,
+                                                           on_update_images_metadata = self.on_update_images_metadata,
+                                                           on_next_page = self.go_image_data_table 
+                                                           )
+        
+        self.image_data_screen = ImageDataTableScreen(dialog_parent = self,
+                                                      on_prev_page = self.go_back_to_image_selection,
+                                                      on_next_page = self.go_to_manager_multi_specs_bands)
+        
+        self.manager_multispect_banb = ManagerMultiSpecBanbScreen(dialog_parent = self,
+                                                                  on_prev_page = self.go_back_to_image_data_table,
+                                                                  on_finish_configure = self.on_finish_configure)
+
+        self.image_selection_screen.add_path_images(images_files)
+        self.stacked_widget.addWidget(self.image_selection_screen)
+        self.stacked_widget.addWidget(self.image_data_screen)
+        self.stacked_widget.addWidget(self.manager_multispect_banb)
+        self.stacked_widget.setCurrentIndex(0)  # Mostrar la pantalla inicial
+    
+    def on_update_images_metadata(self, metadata_images):
+        for idx, meta in enumerate(metadata_images):
+            self.images_data[idx] = meta
+        
+    def go_image_data_table(self):
+        self.image_data_screen.update_data_table(self.images_data)
+        """Método para ir al paso de tabla de datos de imagen"""
+        self.stacked_widget.setCurrentIndex(1)
+
+    def go_back_to_image_selection(self):
+        self.stacked_widget.setCurrentIndex(0)
+
+    def go_back_to_image_data_table(self):
+        self.stacked_widget.setCurrentIndex(1)
+    
+    def go_to_manager_multi_specs_bands(self):
+
+        images_data = self.images_data
+
+        ## Evaluar bandas completas
+        rgb_images = []
+        all_images_data_dict = dict()
+
+        for _, im_data in images_data.items():
+            relative_path = im_data["relative_path"]
+            base_name = os.path.basename(relative_path)[:-4]
+            if "_D" in relative_path:
+                rgb_images.append(base_name)
+
+            all_images_data_dict[base_name] = im_data
+            
+        
+        images_incomplete_bands = []
+        images_complete_bands = []
+        suffixes = ["_MS_R", "_MS_G", "_MS_NIR", "_MS_RE"]
+
+        for base_name in rgb_images:
+            band_names = [
+                base_name.replace("_D", suf) 
+                for suf in suffixes
+            ]
+
+            if not all(name in all_images_data_dict for name in band_names):
+                images_incomplete_bands.append(base_name)
+            else:
+                images_complete_bands.append(base_name)
+        
+        images_incomplete_green = []
+        images_incomplete_red = []
+        images_incomplete_nir = []
+        images_incomplete_re = []
+
+        for base_name_band in all_images_data_dict.keys():
+            if "_MS_G" in base_name_band:
+                band_name_rgb = base_name_band.replace("_MS_G","_D")
+                if band_name_rgb not in images_complete_bands:
+                    images_incomplete_green.append(all_images_data_dict[base_name_band]['name'])
+
+            elif "_MS_R" in base_name_band and "_MS_RE" not in base_name_band:
+                band_name_rgb = base_name_band.replace("_MS_R","_D")
+                if band_name_rgb not in images_complete_bands:
+                    images_incomplete_red.append(all_images_data_dict[base_name_band]['name'])
+        
+            elif "_MS_NIR" in base_name_band:
+                band_name_rgb = base_name_band.replace("_MS_NIR","_D")
+                if band_name_rgb not in images_complete_bands:
+                    images_incomplete_nir.append(all_images_data_dict[base_name_band]['name'])
+            
+            elif "_MS_RE" in base_name_band:
+                band_name_rgb = base_name_band.replace("_MS_RE","_D")
+                if band_name_rgb not in images_complete_bands:
+                    images_incomplete_re.append(all_images_data_dict[base_name_band]['name'])
+            else:
+                continue
+            
+        
+        incomplete_bands = [images_incomplete_bands, images_incomplete_red, 
+                                                   images_incomplete_green, images_incomplete_nir, images_incomplete_re]
+        assert len(set(len(l) for l in incomplete_bands)) == 1, "Algunas capturas no tienen las bandas completas"
+
+        # Ordenar segun matches de numeros y tiempo
+        im_imcomplete_bands = images_incomplete_bands.copy()
+        im_incomplete_red = []
+        im_incomplete_green = []
+        im_incomplete_nir = []
+        im_incomplete_re = []
+
+        for i in range(len(im_imcomplete_bands)):
+            rgb_name = im_imcomplete_bands[i]
+            print("rgb_name:", rgb_name)
+            rgb_name = rgb_name.replace("_D", "")
+            print("rgb_name:", rgb_name)
+            parts = rgb_name.split("_")
+
+            if len(parts) == 3:
+                _, time_str, num_img = parts
+            else:
+                im_incomplete_red.append(images_incomplete_red[i])
+                im_incomplete_green.append(images_incomplete_green[i])
+                im_incomplete_nir.append(images_incomplete_nir[i])
+                im_incomplete_re.append(images_incomplete_re[i])
+                print("Formato inesperado:", rgb_name)
+
+            #_, time_str, num_img = rgb_name.split("-")
+            
+            num_img = "_" + num_img + "_"
+            print("time_str:", time_str)
+            print("num_img:", num_img)
+            print("time_str:", time_str[:-2])
+            idx_red = [j for j, s in enumerate(images_incomplete_red) if num_img in s and time_str[:-2] in s]
+            idx_green = [j for j, s in enumerate(images_incomplete_green) if num_img in s and time_str[:-2] in s]
+            idx_nir = [j for j, s in enumerate(images_incomplete_nir) if num_img in s and time_str[:-2] in s]
+            idx_re = [j for j, s in enumerate(images_incomplete_re) if num_img in s and time_str[:-2] in s]
+
+            if len(idx_red) > 0:
+                im_incomplete_red.append(images_incomplete_red[idx_red[0]])
+            else:
+                im_incomplete_red.append(images_incomplete_red[i])
+                print("images_incomplete_red:", images_incomplete_red)
+
+            if len(idx_green) > 0:
+                im_incomplete_green.append(images_incomplete_green[idx_green[0]])
+            else:
+                im_incomplete_green.append(images_incomplete_green[i])
+
+            if len(idx_nir) > 0:
+                im_incomplete_nir.append(images_incomplete_nir[idx_nir[0]])
+            else:
+                im_incomplete_nir.append(images_incomplete_nir[i])
+
+            if len(idx_re) > 0:
+                im_incomplete_re.append(images_incomplete_re[idx_re[0]])
+            else:
+                im_incomplete_re.append(images_incomplete_re[i])
+
+        self.manager_multispect_banb.update_tables(im_imcomplete_bands, im_incomplete_red, 
+                                                   im_incomplete_green, im_incomplete_nir, im_incomplete_re)
+        #self.image_data_screen.update_data_table(self.new_analysis_data_store.images_data)
+        """Método para ir al paso de tabla de datos de imagen"""
+        self.stacked_widget.setCurrentIndex(2)
+    
+    def get_data(self):
+        return self.images_data, self.flight_info
+
+    def on_finish_configure(self, rows_bands):
+
+        for bands in rows_bands:
+            rgb_band = bands[0]
+            for _, im_d in self.images_data.items():
+                if rgb_band in im_d['name']:
+                    im_d["muitispec_bands"] = dict(r = bands[1],
+                                                   g = bands[2],
+                                                   nir = bands[3],
+                                                   re = bands[4])
+
+        avg_alt = None
+        avg_gsd = None
+
+        if len(self.images_data):
+            num_images = len(self.images_data)
+            alts = [im_data['relative_altitude'] for im_data in self.images_data.values()]
+            avg_alt = sum(alts) / num_images
+            print("avg_alt:", avg_alt)
+
+            gsds = [im_data['gsd_horizontal'] for im_data in self.images_data.values() if "_D.JPG" not in im_data['relative_path']]
+            avg_gsd = sum(gsds) / len(gsds)
+            print("avg_gsd:", avg_gsd)
+
+            self.flight_info["avg_alt"] = avg_alt
+            self.flight_info["avg_gsd"] = avg_gsd
+
+        #self.dialog_parent.new_analysis_data_store.set_gsd_avg(avg_gsd)
+        #self.dialog_parent.new_analysis_data_store.set_alt_avg(avg_alt)
+        
+        #self.dialog_parent.new_analysis_data_store.update_processing_config(option_resolution = 0,
+        #                                                                   target_resolution = avg_gsd * 8, 
+        #                                                                    threshold_nitrogen = 2.0)
+
+        #self.dialog_parent.finished_configure.emit()
+        if isinstance(self, QDialog):
+            self.accept()  
+        else:
+            self.close()
+
+
 class NewAnalysisDialog(QDialog):
     finished_configure = Signal()
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Nuevo Análisis")
+        self.setWindowTitle("Nuevo Análisis de Parcela")
         self.setFixedSize(1280, 650)
 
         self.stacked_widget = QStackedWidget(self)  # Contenedor principal de pantallas
@@ -969,14 +1472,6 @@ class NewAnalysisDialog(QDialog):
         self.current_step = 0  # Variable para llevar el control de los pasos
         self.stacked_widget.setCurrentIndex(self.current_step)  # Mostrar la pantalla inicial
     
-    def save_metadata(self, columns, metadata):
-        df = pd.DataFrame(metadata, columns=columns)
-        name =  self.initial_screen.name_input.text().strip()
-        folder_path =  self.initial_screen.folder_input.text().strip()
-        # Construir la ruta final
-        final_path = os.path.join(folder_path, name, "image_metadata.csv")
-        df.to_csv(final_path, index=False)
-
     def go_to_image_selection_screen(self):
         """Método para ir al paso de selección de imágenes"""
         if self.initial_screen.name_input.text().strip() and self.initial_screen.folder_input.text().strip():
@@ -1055,9 +1550,69 @@ class NewAnalysisDialog(QDialog):
                     images_incomplete_re.append(all_images_data_dict[base_name_band]['name'])
             else:
                 continue
+            
         
-        self.manager_multispect_banb.update_tables(images_incomplete_bands, images_incomplete_red, 
-                                                   images_incomplete_green, images_incomplete_nir, images_incomplete_re)
+        incomplete_bands = [images_incomplete_bands, images_incomplete_red, 
+                                                   images_incomplete_green, images_incomplete_nir, images_incomplete_re]
+        assert len(set(len(l) for l in incomplete_bands)) == 1, "Algunas capturas no tienen las bandas completas"
+
+        # Ordenar segun matches de numeros y tiempo
+        im_imcomplete_bands = images_incomplete_bands.copy()
+        im_incomplete_red = []
+        im_incomplete_green = []
+        im_incomplete_nir = []
+        im_incomplete_re = []
+
+        for i in range(len(im_imcomplete_bands)):
+            rgb_name = im_imcomplete_bands[i]
+            print("rgb_name:", rgb_name)
+            rgb_name = rgb_name.replace("_D", "")
+            print("rgb_name:", rgb_name)
+            parts = rgb_name.split("_")
+
+            if len(parts) == 3:
+                _, time_str, num_img = parts
+            else:
+                im_incomplete_red.append(images_incomplete_red[i])
+                im_incomplete_green.append(images_incomplete_green[i])
+                im_incomplete_nir.append(images_incomplete_nir[i])
+                im_incomplete_re.append(images_incomplete_re[i])
+                print("Formato inesperado:", rgb_name)
+
+            #_, time_str, num_img = rgb_name.split("-")
+            
+            num_img = "_" + num_img + "_"
+            print("time_str:", time_str)
+            print("num_img:", num_img)
+            print("time_str:", time_str[:-2])
+            idx_red = [j for j, s in enumerate(images_incomplete_red) if num_img in s and time_str[:-2] in s]
+            idx_green = [j for j, s in enumerate(images_incomplete_green) if num_img in s and time_str[:-2] in s]
+            idx_nir = [j for j, s in enumerate(images_incomplete_nir) if num_img in s and time_str[:-2] in s]
+            idx_re = [j for j, s in enumerate(images_incomplete_re) if num_img in s and time_str[:-2] in s]
+
+            if len(idx_red) > 0:
+                im_incomplete_red.append(images_incomplete_red[idx_red[0]])
+            else:
+                im_incomplete_red.append(images_incomplete_red[i])
+                print("images_incomplete_red:", images_incomplete_red)
+
+            if len(idx_green) > 0:
+                im_incomplete_green.append(images_incomplete_green[idx_green[0]])
+            else:
+                im_incomplete_green.append(images_incomplete_green[i])
+
+            if len(idx_nir) > 0:
+                im_incomplete_nir.append(images_incomplete_nir[idx_nir[0]])
+            else:
+                im_incomplete_nir.append(images_incomplete_nir[i])
+
+            if len(idx_re) > 0:
+                im_incomplete_re.append(images_incomplete_re[idx_re[0]])
+            else:
+                im_incomplete_re.append(images_incomplete_re[i])
+
+        self.manager_multispect_banb.update_tables(im_imcomplete_bands, im_incomplete_red, 
+                                                   im_incomplete_green, im_incomplete_nir, im_incomplete_re)
         #self.image_data_screen.update_data_table(self.new_analysis_data_store.images_data)
         """Método para ir al paso de tabla de datos de imagen"""
         self.stacked_widget.setCurrentIndex(3)

@@ -3,7 +3,7 @@ from PySide6.QtGui import QIcon, QImage, QPixmap, QPainter, QPalette, QColor
 from PySide6.QtCore import Qt, QSize, Signal, QRectF, QMutex, Signal, Slot, Qt, QThread, QObject
 
 import os
-from dotenv import load_dotenv
+#from dotenv import load_dotenv
 import sys
 from core.utils import resource_path
 from views.dialog_new_analysis import AnalysisData, NewAnalysisDialog
@@ -13,12 +13,13 @@ from views.map_mosaic import MapTreeScreen
 import multiprocessing 
 from datetime import datetime
 import json
+import uuid
 
-load_dotenv(resource_path('.env'))
+#load_dotenv(resource_path('.env'))
 
 class NavItem(QWidget):
-    def __init__(self, icon_path, text):
-        super().__init__()
+    def __init__(self, icon_path, text, minimun_height = None):
+        super().__init__()  
         layout = QVBoxLayout()
         layout.setAlignment(Qt.AlignCenter)
         
@@ -28,10 +29,13 @@ class NavItem(QWidget):
         
         text_label = QLabel(text)
         text_label.setAlignment(Qt.AlignCenter)
-        
+        text_label.setWordWrap(True)
+        if minimun_height:
+            text_label.setMinimumHeight(minimun_height)
         layout.addWidget(icon_label)
         layout.addWidget(text_label)
         self.setLayout(layout)
+        
         # Estilo base transparente
         self.setStyleSheet("""
             QWidget {
@@ -75,20 +79,20 @@ class MainContent(QWidget):
         item3.setTextAlignment(Qt.AlignCenter)
 
         self.navbar.addItem(item1)
-        item1.setSizeHint(QSize(100, 100))
+        item1.setSizeHint(QSize(110, 110))
         self.navbar.setItemWidget(item1, NavItem(resource_path(os.path.join("assets", "home.svg")), "Inicio"))
         self.navbar.addItem(item2)
-        item2.setSizeHint(QSize(100, 100))
-        self.navbar.setItemWidget(item2, NavItem(resource_path(os.path.join("assets", "map.svg")), "Mapa Capturas"))
+        item2.setSizeHint(QSize(110, 110))
+        self.navbar.setItemWidget(item2, NavItem(resource_path(os.path.join("assets", "config-analisys-icon.svg")), "Configuración de Análisis de Parcela", minimun_height = 45))
         self.navbar.addItem(item3)
-        item3.setSizeHint(QSize(100, 100))
-        self.navbar.setItemWidget(item3, NavItem(resource_path(os.path.join("assets", "map-marker.svg")), "Mapa Arboles"))
-        self.navbar.setFixedWidth(105)
+        item3.setSizeHint(QSize(110, 110))
+        self.navbar.setItemWidget(item3, NavItem(resource_path(os.path.join("assets", "map.svg")), "Resultados"))
+        self.navbar.setFixedWidth(120)
         self.navbar.currentRowChanged.connect(self.switch_page)
 
         # Desabilitados los items
-        #self.disable_nav_item(1)
-        #self.disable_nav_item(2)
+        self.disable_nav_item(1)
+        self.disable_nav_item(2)
        
         # Contenedor central
         self.stack = QStackedWidget()
@@ -146,6 +150,7 @@ class MainContent(QWidget):
     def update_analysis_data(self, analysis_data_store):
         self.analysis_data_store = analysis_data_store
         self.page_map_images.update_map_view(self.analysis_data_store.images_data)
+        self.page_map_images.update_details_analysis()
         self.navbar.setCurrentRow(1)  # Cambiar al segundo ítem del navbar
         self.enable_nav_item(1)
 
@@ -157,7 +162,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("AgroHass")
-        ruta_icono = resource_path(os.path.join("assets", "icon_software.ico"))
+        ruta_icono = resource_path(os.path.join("assets", "icon_app.ico"))
         self.setWindowIcon(QIcon(ruta_icono))
         #self.setGeometry(100,100,800,600)
         self.resize(1300, 720)
@@ -181,17 +186,44 @@ class MainWindow(QMainWindow):
             base_dir = dialog.new_analysis_data_store.base_dir
             images_data = dialog.new_analysis_data_store.images_data
             name = dialog.new_analysis_data_store.name
-            
+            gsd_avg = dialog.new_analysis_data_store.gsd_avg
+            alt_avg = dialog.new_analysis_data_store.alt_avg
+
+            id_unico = str(uuid.uuid4())
+
             project_info = {
+                    "identifier_id": id_unico,
                     "name": name,
                     "creation_date": datetime.now().isoformat(),
                     "num_images": len(images_data),
-                    "base_dir": base_dir
+                    "base_dir": base_dir,
+                    "gsd_avg": gsd_avg,
+                    "alt_avg": alt_avg
                 }
+            
+            fecha_formateada = ""
+            hora_ampm = ""
+            if len(images_data) > 0:
+                exif_str = images_data[0]['datetime_original']
+                dt = datetime.strptime(exif_str, "%Y:%m:%d %H:%M:%S")
+
+                # Formatear al formato deseado
+                fecha_formateada = dt.strftime("%d/%m/%Y")
+                hora_ampm = dt.strftime("%I %p").lstrip("0")
+
+            dialog.new_analysis_data_store.set_adquisition_date(fecha_formateada)
+            
+            self.main_window.update_analysis_data(dialog.new_analysis_data_store)
+            
+            project_info["adquisition_date"] = fecha_formateada
+            project_info["hora_ampm"] = hora_ampm
+
+            field_information = dialog.new_analysis_data_store.field_info
             
             config = {
                     "project_info": project_info,
-                    "image_metatada": images_data
+                    "image_metatada": images_data,
+                    "field_information": field_information
                 }
 
             self.main_content.page_home.save_configure_analysis(base_dir, config)
@@ -285,6 +317,7 @@ if __name__ == "__main__":
     multiprocessing.freeze_support()
     
     app = QApplication(sys.argv)
+    app.setApplicationName("AgroHass")
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

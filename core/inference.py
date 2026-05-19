@@ -1,14 +1,14 @@
 from PySide6.QtCore import QMutex
-import torch
 from datetime import datetime
 import traceback
 import os
 import gc
-from ultralytics import YOLO
 import numpy as np
 import cv2
 import json
 from tqdm import tqdm
+import onnxruntime as ort
+
 
 from core.utils import resource_path
 
@@ -79,13 +79,20 @@ class TreeDetectorYolo:
     _instance = None
     _mutex = QMutex()
     
+    # Define tus clases aquí (ONNX pierde el diccionario de nombres)
+    CLASS_NAMES = {0: "Arbol"} 
+    
     def __init__(self):
         if TreeDetectorYolo._instance is not None:
             raise Exception("Esta clase es un singleton. Usa get_instance()")
         
-        self.device = self._select_device()
-        print("self.device:", self.device)
-        self.model = self._load_model()
+        self.providers = self._select_providers()
+        print("Providers seleccionados:", self.providers)
+        self.session = self._load_model()
+        
+        # Obtener nombres de los nodos de entrada y salida del grafo ONNX
+        self.input_name = self.session.get_inputs()[0].name
+        self.output_names = [out.name for out in self.session.get_outputs()]
         
     @classmethod
     def get_instance(cls):
@@ -97,104 +104,194 @@ class TreeDetectorYolo:
         finally:
             cls._mutex.unlock()
     
-    def _select_device(self):
-        if torch.cuda.is_available():
-            torch.backends.cudnn.benchmark = True
-            return "cuda"
-        return "cpu"
+    def _select_providers(self):
+        available = ort.get_available_providers()
+        if 'CUDAExecutionProvider' in available:
+            return ['CUDAExecutionProvider', 'CPUExecutionProvider']
+        return ['CPUExecutionProvider']
     
     def _load_model(self):
-        model = YOLO(resource_path(os.path.join("assets", "models", "yolo11s-seg-finituned-2-split-1280.pt")), task= 'segment')
-
-        return model
+        # CAMBIAR EXTENSIÓN A .onnx
+        model_path = resource_path(os.path.join("assets", "models", "yolo11s-seg-finituned-2-split-1280.onnx"))
+        return ort.InferenceSession(model_path, providers=self.providers)
     
-    def resize_and_unpad_mask(self, mask, original_shape, pad_shape):
-        mask_resized = cv2.resize(mask, pad_shape, interpolation=cv2.INTER_LANCZOS4)
-        height, width = original_shape
-        binary_mask = np.maximum(binary_mask, mask_resized[:height, :width])  # Unión lógica (OR)
-        return binary_mask
+    def _preprocess(self, image):
+        # cv2.dnn.blobFromImage es súper eficiente en C++ para preprocesar
+        blob = cv2.dnn.blobFromImage(
+            image, 1/255.0, (IM_SIZE, IM_SIZE), 
+            swapRB=True, crop=False
+        )
+        return blob
 
-    def mask_to_polygons(self, mask_bin):
-        # Asegurar binaria tipo 0/255
-        mask_bin = (mask_bin > 0).astype(np.uint8) * 255
-        contours, _ = cv2.findContours(mask_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    def _postprocess(self, outputs, scale_factor, conf_thresh, img_shape):
+        """
+        Matemática cruda para decodificar YOLO Segmentation sin PyTorch.
+        """
+        predictions = dict(
+            bboxes=[], 
+            segmentations=[],
+            classes=[], 
+            scores=[], 
+            timestamp=datetime.now().isoformat()
+        )
+        orig_h, orig_w = img_shape
 
-        polygons = []
-        for cnt in contours:
-            if len(cnt) >= 3:  # descartar degenerados
-                poly = cnt.squeeze(1).tolist()  # [[x1,y1], [x2,y2], ...]
-                polygons.append(poly)
-        return polygons
-    
-    def predict(self, 
-                image_paths, 
-                save_dir =  "./results"):
         
+        # Salida 0: Coordenadas, Scores y Coeficientes de Máscara
+        # Shape esperado: (1, 4 + num_clases + 32_mascaras, 8400)
+        preds = outputs[0][0].T  # Transponemos a (8400, N) para iterar filas
+        
+        # Salida 1: Prototipos de máscaras
+        # Shape esperado: (1, 32, 160, 160) u otra resolución según el IM_SIZE
+        protos = outputs[1][0]   # (32, H_proto, W_proto)
+        num_masks = protos.shape[0]
+        num_classes = preds.shape[1] - 4 - num_masks
+        
+        # 1. Separar los tensores
+        boxes_cxcywh = preds[:, :4]
+        scores_matrix = preds[:, 4:4+num_classes]
+        mask_coefs = preds[:, 4+num_classes:]
+        
+        # 2. Convertir cajas (Centro X, Centro Y, W, H) a (X1, Y1, X2, Y2)
+        boxes_xyxy = np.empty_like(boxes_cxcywh)
+        boxes_xyxy[:, 0] = boxes_cxcywh[:, 0] - boxes_cxcywh[:, 2] / 2
+        boxes_xyxy[:, 1] = boxes_cxcywh[:, 1] - boxes_cxcywh[:, 3] / 2
+        boxes_xyxy[:, 2] = boxes_cxcywh[:, 0] + boxes_cxcywh[:, 2] / 2
+        boxes_xyxy[:, 3] = boxes_cxcywh[:, 1] + boxes_cxcywh[:, 3] / 2
+        
+        # 3. Obtener el score máximo y su clase
+        class_ids = np.argmax(scores_matrix, axis=1)
+        confidences = scores_matrix[np.arange(len(class_ids)), class_ids]
+        
+        # 4. Filtrar por confianza mínima para optimizar memoria antes del NMS
+        valid_idx = confidences > conf_thresh
+        boxes_xyxy = boxes_xyxy[valid_idx]
+        confidences = confidences[valid_idx]
+        class_ids = class_ids[valid_idx]
+        mask_coefs = mask_coefs[valid_idx]
+        
+        # 5. Non-Maximum Suppression (NMS)
+        iou_thresh = 0.45
+        indices = cv2.dnn.NMSBoxes(boxes_xyxy.tolist(), confidences.tolist(), conf_thresh, iou_thresh)
+        
+        if len(indices) > 0:
+            indices = indices.flatten()
+            
+            for i in indices:
+                # Datos de esta detección
+                box = boxes_xyxy[i]
+                conf = confidences[i]
+                cls_id = class_ids[i]
+                coef = mask_coefs[i]
+                
+                # --- PROCESAMIENTO DE LA MÁSCARA ---
+                # Multiplicación matricial: (1, 32) @ (32, H*W) -> (1, H*W)
+                proto_flat = protos.reshape(num_masks, -1)
+                mask = np.dot(coef, proto_flat).reshape(protos.shape[1], protos.shape[2])
+                
+                # Función Sigmoide para obtener probabilidades entre 0 y 1
+                # (np.clip evita overflow de exp)
+                mask = 1.0 / (1.0 + np.exp(np.clip(-mask, -500, 500)))
+                
+                # Redimensionar la máscara al tamaño de la imagen de entrada (IM_SIZE x IM_SIZE)
+                mask_resized = cv2.resize(mask, (IM_SIZE, IM_SIZE), interpolation=cv2.INTER_LINEAR)
+                
+                # Delimitar la máscara dentro del Bounding Box (cortar ruido de fondo)
+                x1, y1, x2, y2 = map(int, box)
+                # Limitar coords a la imagen
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(IM_SIZE, x2), min(IM_SIZE, y2)
+                
+                bbox_mask = np.zeros_like(mask_resized)
+                bbox_mask[y1:y2, x1:x2] = 1
+                
+                # Binarización y aplicación de límite del BBox
+                mask_bin = ((mask_resized > 0.5) * bbox_mask).astype(np.uint8) * 255
+                
+                # Extracción de contornos (Polígonos)
+                contours, _ = cv2.findContours(mask_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                
+                cnt_largest = max(contours, key=cv2.contourArea)
+                #for cnt in contours:
+                if len(cnt_largest) >= 3: # descartar ruido
+                    poly = cnt_largest.squeeze(1).astype(np.float32) * scale_factor
+                    poly[:, 0] = poly[:, 0] / float(orig_w) #np.clip(poly[:, 0] / orig_w, 0, 1)
+                    poly[:, 1] = poly[:, 1] / float(orig_h) #np.clip(poly[:, 1] / orig_h, 0, 1)
+                    
+                    predictions["segmentations"].append(poly.tolist())
+                        
+                # Escalar el BBox y guardarlo
+
+                
+                bbox = box * scale_factor
+                bbox[0] = np.clip(bbox[0] / orig_w, 0, 1)
+                bbox[1] = np.clip(bbox[1] / orig_h, 0, 1)
+                bbox[2] = np.clip(bbox[2] / orig_w, 0, 1)
+                bbox[3] = np.clip(bbox[3] / orig_h, 0, 1)
+                #bbox[:, 1] = np.clip(bbox[:, 1] / orig_h, 0, 1)
+                
+                bbox = bbox.tolist()
+                #scaled_box = (box * scale_factor).tolist()
+                cls_name = self.CLASS_NAMES.get(int(cls_id), f"Class_{int(cls_id)}")
+                
+                predictions['bboxes'].append(bbox)
+                predictions['scores'].append(float(conf))
+                predictions['classes'].append(cls_name)
+
+        return predictions
+    
+    def predict(self, image_paths, save_dir="./results", conf_thresh=0.5):
         all_results = []
-        print("save_dir:", save_dir)
         os.makedirs(save_dir, exist_ok=True)
-        os.makedirs(f"{save_dir}/visualizations", exist_ok=True)
+        #os.makedirs(f"{save_dir}/visualizations", exist_ok=True)
         os.makedirs(f"{save_dir}/detections", exist_ok=True)
 
-        for image_path in tqdm(image_paths, desc= "Trees Deteccion"):
+        for image_path in image_paths: #tqdm(image_paths, desc="Trees Deteccion"):
             try:
                 if not os.path.exists(image_path):
                     raise FileNotFoundError(f"Imagen no encontrada: {image_path}")
                 
                 self._clean_memory()
-                print("image_path:", image_path)
                 image = cv2.imread(image_path)
                 height, width = image.shape[:2]
-                image = distortion_correction(image)
-                im_padded = padding_to_square_image(image)
+                
+                image_undistort = distortion_correction(image)
+                im_padded = padding_to_square_image(image_undistort)
                 h_im_pad, w_im_pad = im_padded.shape[:2]
-                im_resized = cv2.resize(im_padded, (IM_SIZE, IM_SIZE), interpolation=cv2.INTER_LANCZOS4)
-                results = self.model.predict(im_resized, imgsz = (IM_SIZE, IM_SIZE), conf=0.5)
-                predictions = dict(
-                    bboxes= [], 
-                    #masks= [], 
-                    segmentations= [],
-                    classes= [], 
-                    scores= [], 
-                    timestamp= datetime.now().isoformat()
-                )
+                
+                # 1. Preprocesamiento ONNX (Blob)
+                input_tensor = self._preprocess(im_padded)
+                
+                # 2. Inferencia pura ONNX
+                outputs = self.session.run(self.output_names, {self.input_name: input_tensor})
+                
+                # 3. Decodificación
                 scale_factor = w_im_pad / IM_SIZE
-                for r in results:
-                    if r.boxes is not None:
-                        boxes = r.boxes.xyxy.cpu().numpy()
-                        scores = r.boxes.conf.cpu().numpy()
-                        classes = r.boxes.cls.cpu().numpy()
-                        for box, score, cls in zip(boxes, scores, classes):
-                            predictions['bboxes'].append((box * scale_factor).tolist())
-                            predictions['scores'].append(float(score))
-                            predictions['classes'].append(r.names[cls])
-                    
-                    print("r.names",r.names)
-                    if r.masks is not None:
-                        #print(r.masks)
-                        
-                        
+                #scale_factor = 1 / IM_SIZE
+                
+                #w_pad = w_im_pad - width
+                #h_pad = h_im_pad - height
 
-                        for seg in r.masks.xy:
-                            poly = seg * scale_factor
-                            poly[:, 0] = np.clip(poly[:, 0], 0, width)  # eje x limitado al ancho original
-                            poly[:, 1] = np.clip(poly[:, 1], 0, height)
-                            poly = poly.astype(np.int32)
-                            predictions["segmentations"].append(poly.tolist())
-
+                #predictions = self._postprocess(outputs, scale_factor, conf_thresh, (height, width))
+                predictions = self._postprocess(outputs, scale_factor, conf_thresh, (height, width))
+                
                 all_results.append(predictions)
-                im_result = self.draw_detections(image, 
-                                        predictions['segmentations'], 
-                                        predictions["classes"], 
-                                        predictions["scores"],
-                                        predictions['bboxes'])
+                
+                # 4. Dibujar Resultados
+                # im_result = self.draw_detections(
+                #     image_undistort,  # Dibujamos sobre la no-paddeada (undistorted)
+                #     predictions['segmentations'], 
+                #     predictions["classes"], 
+                #     predictions["scores"],
+                #     predictions['bboxes'],
+                #     im_shape=(height, width)
+                # )
+                
                 filename = os.path.basename(image_path)[:-4]
-                
-                cv2.imwrite(f"{save_dir}/visualizations/{filename}_RESULT.png", im_result)
-                
+                #cv2.imwrite(f"{save_dir}/visualizations/{filename}_RESULT.png", im_result)
                 
                 with open(f"{save_dir}/detections/{filename}_DETECTIONS.json", "w", encoding="utf-8") as f:
-                    json.dump({"image_path": image_path, "detecctions": predictions}, f, indent= 4, ensure_ascii= True)
+                    json.dump({"image_path": image_path, "detecctions": predictions}, f, indent=4, ensure_ascii=True)
                
             except Exception as e:
                 print(f"Error en predicción: {str(e)}")
@@ -202,74 +299,70 @@ class TreeDetectorYolo:
                 all_results.append(None)
             finally:
                 self._clean_memory()
+                
         return all_results
-    
-    def _process_segmentation(self, segmentation):
-        if isinstance(segmentation, list):
-            if all(isinstance(v, (int, float)) for v in segmentation):
-                return np.array(segmentation, dtype=np.int32).reshape((-1, 2)).tolist()
-            elif all(isinstance(v, list) for v in segmentation):
-                return [np.array(s, dtype=np.int32).reshape((-1, 2)).tolist() for s in segmentation]
-        return segmentation
     
     def _clean_memory(self):
         gc.collect()
-        if self.device.startswith('cuda'):
-            torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
 
-    def draw_detections(self, image, segmentations, classes, scores, bboxes = None, alpha=0.45):
+    def draw_detections(self, image, segmentations, classes, scores, bboxes=None, alpha=0.45, im_shape = None):
         img_out = image.copy()
+        h, w = im_shape
+        
+        
         for i, seg in enumerate(segmentations):
-            pts = np.array(seg, dtype=np.int32).reshape(-1,1,2)
+            if len(seg) == 0: continue
+            #print("seg:", seg)
+            pts = np.array(seg)
+            pts[:, 0] = np.clip(pts[:, 0] * w, 0, w)
+            pts[:, 1] = np.clip(pts[:, 1] * h, 0, h)
+            #print("pts:", pts)
+            pts = np.array(pts, dtype=np.int32).reshape(-1, 1, 2)
             
-            # Color azul claro
-            color = (255, 200, 0)  # BGR (azul cielo)
-
-            # Relleno
+            
+            color = (255, 200, 0)
             cv2.fillPoly(img_out, [pts], color)
-            # Borde
-            #cv2.polylines(img_out, [pts], isClosed=True, color=(0, 0, 255), thickness=4)
-
-            # Texto
-            # Etiqueta
-            # Dibujar bounding box si existe
             
-            if bboxes is not None:
-                x1, y1, x2, y2 = map(int, bboxes[i])
+            # Se usa una validación simple de índices por si hay múltiples polígonos por caja
+            # (En YOLO seg, es 1 caja -> N polígonos si el objeto está dividido visualmente)
+            box_idx = i if i < len(bboxes) else 0 
+            
+            if bboxes is not None and box_idx < len(bboxes):
+                bbox = bboxes[box_idx].copy()
+                
+                bbox[0] = np.clip(bbox[0] * w, 0, w)
+                bbox[1] = np.clip(bbox[1] * h, 0, h)
+                bbox[2] = np.clip(bbox[2] * w, 0, w)
+                bbox[3] = np.clip(bbox[3] * h, 0, h)
+
+                x1, y1, x2, y2 = map(int, bbox)
                 cv2.rectangle(img_out, (x1, y1), (x2, y2), (0, 0, 255), 10)
 
-            cls = classes[i]
-            score = scores[i]
-            label = f"{cls} {score:.2f}"
-            x, y = pts[0][0]
+                cls = classes[box_idx]
+                score = scores[box_idx]
+                label = f"{cls} {score:.2f}"
+                x, y = pts[0][0]
+                
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                scale = 2
+                thickness = 8
+                (text_w, text_h), baseline = cv2.getTextSize(label, font, scale, thickness)
+
+                cv2.rectangle(img_out, 
+                            (x, y - text_h - baseline - 5), 
+                            (x + text_w + 10, y + 5),       
+                            (0, 0, 255),                    
+                            -1)                             
+
+                cv2.putText(img_out, label, 
+                    (x + 5, y - baseline), 
+                    font, scale, 
+                    (255, 255, 255), 
+                    thickness)
             
-            # Fuente y escala
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            scale = 2
-            thickness = 8
-
-            # Calcular tamaño del texto
-            (text_w, text_h), baseline = cv2.getTextSize(label, font, scale, thickness)
-
-            # Coordenadas del rectángulo (fondo rojo)
-            cv2.rectangle(img_out, 
-                        (x, y - text_h - baseline - 5),  # esquina superior izq
-                        (x + text_w + 10, y + 5),        # esquina inferior der
-                        (0, 0, 255),                    # rojo BGR
-                        -1)                             # relleno
-
-            cv2.putText(img_out, label, 
-                (x + 5, y - baseline), 
-                font, scale, 
-                (255, 255, 255),  # blanco
-                thickness)
-            
-        # Combinar con transparencia
         final = cv2.addWeighted(img_out, alpha, image, 1 - alpha, 0)
-
         return final
-
+    
 if __name__ == "__main__":
     detector = TreeDetectorYolo().get_instance()
     from glob import glob
