@@ -423,8 +423,8 @@ class PdfGeneratorWorker(QThread):
                 if self.data['incl_detalles']:
                     general_info.append(("Cantidad de Imágenes:", sumary_processing["total_images"]))
                     general_info.append(("Modelo de Cámara:", "M3M"))
-                    general_info.append(("GSD Promedio:", round(sumary_processing["avg_gsd_multispec"],2)))
-                    general_info.append(("Altura de Vuelo Promedio:", str(round(sumary_processing["avg_alt"], 2))))
+                    general_info.append(("GSD Promedio:", str(round(sumary_processing["avg_gsd_multispec"],2)) + " cm/pix"))
+                    general_info.append(("Altura de Vuelo Promedio:", str(round(sumary_processing["avg_alt"], 2)) + " m"))
             # EXAMPLE_GENERAL_INFO = [("Nombre del Análisis:", "Análisis de ejemplo 1"),
             #         ("Nombre del Solicitante:", "Carlos Quispe"),
             #         ("Localidad:", "Apurimac/ Abancay/ Pichirhua"),
@@ -991,7 +991,7 @@ class ReportDialog(QDialog):
         QLineEdit {
             border: 1px solid #dcdcdc;
             border-radius: 8px;
-            padding: 8px;
+            padding: 4px;
             font-size: 12px;
             background: white;
         }
@@ -2655,7 +2655,7 @@ class StatCard(QFrame):
         layout.addLayout(layout_area)
 
         #layout.addWidget(self.lbl_value)
-        layout.setContentsMargins(20, 15, 20, 15)
+        layout.setContentsMargins(15, 10, 15, 10)
     
     def update_count(self, num_trees = 0):
         self.lbl_value.setText(str(num_trees))
@@ -3343,7 +3343,7 @@ class NDVIScaleCard(QFrame):
         ndvi_data = {
         "title": "¿Qué es el NDVI?",
         "definition": "El <b>NDVI (Índice de Vegetación de Diferencia Normalizada)</b> es una métrica utilizada para cuantificar la salud y densidad de la vegetación mediante datos de sensores multiespectrales a bordo de drones. Se calcula a partir de bandas específicas: roja e infrarroja cercana.",
-        "average_desc": "Nuestro software calcula el valor promedio de NDVI para cada árbol individualmente. Esto permite identificar variaciones de salud específicas planta por planta, facilitando intervenciones precisas y un monitoreo detallado del vigor de cada cultivo.",
+        "average_desc": "Nuestro software calcula el valor promedio de NDVI para cada árbol individualmente. Esto permite identificar variaciones de salud específicas planta por planta, facilitando intervenciones precisas árbol por árbol en lugar de utilizar promedios generales del lote.",
         "equation_str": "NDVI = (NIR - RED) / (NIR + RED)",
         "variable_legend": "*NIR: Infrarrojo Cercano | RED: Banda Roja Visible"
         }
@@ -3812,8 +3812,8 @@ class StageFieldWidget(QWidget):
         self.setAttribute(Qt.WA_StyledBackground, True)
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignCenter)
-        layout.setContentsMargins(10, 12, 10, 12) # Márgenes internos (padding)
-        layout.setSpacing(6) # Espacio entre los elementos
+        layout.setContentsMargins(10, 5, 10, 5) # Márgenes internos (padding)
+        layout.setSpacing(5) # Espacio entre los elementos
         #self..setObjectName("MainFrame")
 
 
@@ -4020,8 +4020,8 @@ class NDVIWidget(QFrame):
         # RUTAS DE TUS ARCHIVOS SVG # (Posible Problema)
         # Asegúrate de tener los archivos en la misma carpeta o poner la ruta completa
         self.normal_row = NDVIRow("Normal", 65, 183, "#2E7D32") # Sin icono según tu imagen original
-        self.alert_row = NDVIRow("Bajo (Alerta)", 25, 71, "#FCCF07", svg_path= resource_path("assets/warn_icon.svg"))
-        self.problem_row = NDVIRow("Muy Bajo (Pos. Problema)", 10, 28, "#F18118", svg_path= resource_path("assets/alert_orange_icon.svg"))
+        self.alert_row = NDVIRow("Bajo (0.55 - 0.70)", 25, 71, "#FCCF07", svg_path= resource_path("assets/warn_icon.svg"))
+        self.problem_row = NDVIRow("Muy Bajo (<0.55)", 10, 28, "#F18118", svg_path= resource_path("assets/alert_orange_icon.svg"))
 
         container_layout.addWidget(self.normal_row)
         container_layout.addWidget(self.alert_row)
@@ -4396,8 +4396,8 @@ class MapTreeScreen(QWidget):
         
         self.right_panel.setMaximumWidth(370)
 
-        inner_layout.addWidget(self.mosaic_view, stretch=4)
-        inner_layout.addWidget(self.right_panel, stretch=1)
+        inner_layout.addWidget(self.mosaic_view, stretch=85)
+        inner_layout.addWidget(self.right_panel, stretch=25)
         outer_layout.addWidget(inner_widget)   
 
     def on_change_layer(self, layer):
